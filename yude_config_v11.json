@@ -1,0 +1,315 @@
+{
+    "api_key": "",
+    "is_locked": false,
+    "doctors_struct": [
+        {
+            "order": 1,
+            "name": "郭長熀醫師",
+            "nick": "郭",
+            "active": true
+        },
+        {
+            "order": 2,
+            "name": "陳冰沁醫師",
+            "nick": "沁",
+            "active": true
+        },
+        {
+            "order": 3,
+            "name": "陳志鈴醫師",
+            "nick": "鈴",
+            "active": true
+        },
+        {
+            "order": 4,
+            "name": "陳哲毓醫師",
+            "nick": "毓",
+            "active": true
+        },
+        {
+            "order": 5,
+            "name": "陳奕安醫師",
+            "nick": "安",
+            "active": true
+        },
+        {
+            "order": 6,
+            "name": "吳峻豪醫師",
+            "nick": "吳",
+            "active": true
+        },
+        {
+            "order": 7,
+            "name": "蔡尚妤醫師",
+            "nick": "蔡",
+            "active": true
+        },
+        {
+            "order": 8,
+            "name": "陳貞羽醫師",
+            "nick": "貞",
+            "active": true
+        },
+        {
+            "order": 9,
+            "name": "吳麗君醫師",
+            "nick": "麗",
+            "active": true
+        },
+        {
+            "order": 10,
+            "name": "魏大鈞醫師",
+            "nick": "魏",
+            "active": true
+        },
+        {
+            "order": 11,
+            "name": "郭燿東醫師",
+            "nick": "東",
+            "active": true
+        }
+    ],
+    "assistants_struct": [
+        {
+            "name": "雯萱",
+            "nick": "萱",
+            "active": true,
+            "type": "全職",
+            "custom_max": null,
+            "pref": "normal",
+            "is_main_counter": true
+        },
+        {
+            "name": "小瑜",
+            "nick": "瑜",
+            "active": true,
+            "type": "兼職",
+            "custom_max": 20,
+            "pref": "normal",
+            "is_main_counter": true
+        },
+        {
+            "name": "欣霓",
+            "nick": "霓",
+            "active": true,
+            "type": "兼職",
+            "custom_max": 15,
+            "pref": "normal",
+            "is_main_counter": true
+        },
+        {
+            "name": "昀霏",
+            "nick": "霏",
+            "active": true,
+            "type": "全職",
+            "custom_max": null,
+            "pref": "normal",
+            "is_main_counter": false
+        },
+        {
+            "name": "湘婷",
+            "nick": "湘",
+            "active": true,
+            "type": "全職",
+            "custom_max": null,
+            "pref": "normal",
+            "is_main_counter": false
+        },
+        {
+            "name": "怡安",
+            "nick": "怡",
+            "active": true,
+            "type": "全職",
+            "custom_max": null,
+            "pref": "normal",
+            "is_main_counter": false
+        },
+        {
+            "name": "嘉宜",
+            "nick": "宜",
+            "active": true,
+            "type": "全職",
+            "custom_max": null,
+            "pref": "low",
+            "is_main_counter": false
+        },
+        {
+            "name": "芷瑜",
+            "nick": "芷",
+            "active": true,
+            "type": "全職",
+            "custom_max": null,
+            "pref": "normal",
+            "is_main_counter": false
+        },
+        {
+            "name": "佳臻",
+            "nick": "臻",
+            "active": true,
+            "type": "全職",
+            "custom_max": null,
+            "pref": "normal",
+            "is_main_counter": false
+        },
+        {
+            "name": "紫心",
+            "nick": "紫",
+            "active": true,
+            "type": "全職",
+            "custom_max": null,
+            "pref": "normal",
+            "is_main_counter": false
+        },
+        {
+            "name": "又嘉",
+            "nick": "又",
+            "active": true,
+            "type": "全職",
+            "custom_max": null,
+            "pref": "low",
+            "is_main_counter": false
+        },
+        {
+            "name": "佳萱",
+            "nick": "佳",
+            "active": true,
+            "type": "全職",
+            "custom_max": null,
+            "pref": "normal",
+            "is_main_counter": false
+        },
+        {
+            "name": "紫媛",
+            "nick": "媛",
+            "active": true,
+            "type": "全職",
+            "custom_max": null,
+            "pref": "normal",
+            "is_main_counter": false
+        },
+        {
+            "name": "暐貽",
+            "nick": "貽",
+            "active": true,
+            "type": "兼職",
+            "custom_max": 18,
+            "pref": "normal",
+            "is_main_counter": false
+        }
+    ],
+    "pairing_matrix": {
+        "郭長熀醫師": {
+            "1": "又嘉",
+            "2": "紫心",
+            "3": "怡安"
+        },
+        "陳冰沁醫師": {
+            "1": "嘉宜",
+            "2": "芷瑜",
+            "3": ""
+        },
+        "陳志鈴醫師": {
+            "1": "紫媛",
+            "2": "芷瑜",
+            "3": ""
+        },
+        "陳哲毓醫師": {
+            "1": "佳萱",
+            "2": "",
+            "3": ""
+        },
+        "陳奕安醫師": {
+            "1": "昀霏",
+            "2": "",
+            "3": ""
+        },
+        "吳峻豪醫師": {
+            "1": "湘婷",
+            "2": "",
+            "3": ""
+        },
+        "蔡尚妤醫師": {
+            "1": "佳臻",
+            "2": "",
+            "3": ""
+        },
+        "陳貞羽醫師": {
+            "1": "怡安",
+            "2": "",
+            "3": ""
+        },
+        "吳麗君醫師": {
+            "1": "又嘉",
+            "2": "芷瑜",
+            "3": ""
+        },
+        "魏大鈞醫師": {
+            "1": "又嘉",
+            "2": "",
+            "3": ""
+        },
+        "郭燿東醫師": {
+            "1": "芷瑜",
+            "2": "嘉宜",
+            "3": "昀霏"
+        }
+    },
+    "adv_rules": {
+        "雯萱": {
+            "role_limit": "僅櫃台(含行政)",
+            "shift_limit": "無限制",
+            "slot_whitelist": "",
+            "fixed_slots": "一早櫃,一晚櫃,二早櫃,二午看,三早櫃,三午看,四午櫃,五早櫃,五午櫃,五晚櫃",
+            "avoid": ""
+        },
+        "小瑜": {
+            "role_limit": "僅櫃台(含行政)",
+            "shift_limit": "僅晚班",
+            "slot_whitelist": "",
+            "fixed_slots": "",
+            "avoid": "怡安"
+        },
+        "欣霓": {
+            "role_limit": "僅櫃台(含行政)",
+            "shift_limit": "無限制",
+            "slot_whitelist": "一午,二午,四晚",
+            "fixed_slots": "",
+            "avoid": ""
+        },
+        "暐貽": {
+            "role_limit": "僅流動",
+            "shift_limit": "無限制",
+            "slot_whitelist": "二晚,三晚,四晚,六午,六晚",
+            "fixed_slots": "",
+            "avoid": ""
+        },
+        "怡安": {
+            "role_limit": "無限制",
+            "shift_limit": "無限制",
+            "slot_whitelist": "",
+            "fixed_slots": "",
+            "avoid": "小瑜"
+        },
+        "紫媛": {
+            "role_limit": "無限制",
+            "shift_limit": "無限制",
+            "slot_whitelist": "",
+            "fixed_slots": "",
+            "avoid": "昀霏"
+        },
+        "昀霏": {
+            "role_limit": "無限制",
+            "shift_limit": "無限制",
+            "slot_whitelist": "",
+            "fixed_slots": "",
+            "avoid": "紫媛"
+        }
+    },
+    "template_odd": {},
+    "template_even": {},
+    "year": 2026,
+    "month": 4,
+    "manual_schedule": [],
+    "clinic_holidays": [],
+    "leaves": {}
+}
