@@ -371,13 +371,14 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
 # --- 4. 本地關鍵字解析與 API 雙引擎 ---
 def fuzzy_match_person(name_str, lst):
     clean = name_str.replace("醫師", "").strip()
+    # 【重大修正】雙向包含檢查，解決前面有多餘贅字導致比對失敗的問題
     for item in lst:
-        if clean in item["name"]: return item["name"]
-        if item.get("nick") and clean in item["nick"]: return item["name"]
+        if clean in item["name"] or item["name"] in clean: return item["name"]
+        if item.get("nick") and (clean in item["nick"] or item["nick"] in clean): return item["name"]
     return clean + "醫師" if any("醫師" in d["name"] for d in lst) else clean
 
 def parse_command_local(cmd, year, month, docs, assts):
-    acts = []; wd_map = {"一":1, "二":2, "三":3, "四":4, "五":5, "六":6, "日":7, "天":7}
+    acts = []; wd_map = {"一":1, "二":2, "三":3, "四":4, "五":5, "六":6, "日":7, "天":7, "1":1, "2":2, "3":3, "4":4, "5":5, "6":6, "7":7}
     lines = cmd.replace("，", "\n").replace("、", "\n").split("\n")
     
     for line in lines:
@@ -385,8 +386,8 @@ def parse_command_local(cmd, year, month, docs, assts):
         if not line: 
             continue
         
-        # Rule 1: 醫師給助理跟診 (例: 峻豪醫師禮拜四整天給昀霏跟)
-        m1 = re.search(r'([^\s]+?)(?:醫師)?\s*(?:禮拜|星期)([一二三四五六日天])\s*(整天|早上|下午|晚上|早|午|晚|早午)?\s*(?:給|讓|由|指定)?\s*([^\s]+?)\s*(?:跟|上)', line)
+        # Rule 1: 醫師給助理跟診 (加強彈性支援)
+        m1 = re.search(r'([^\s\d\(\)]+?)(?:醫師)?\s*(?:禮拜|星期|週|周)([一二三四五六日天1-7])\s*(整天|早上|下午|晚上|早午晚|早午|午晚|早晚|早|午|晚)?\s*(?:給|讓|由|指定)?\s*([^\s\d\(\)]+?)\s*(?:跟|上)', line)
         if m1:
             doc = fuzzy_match_person(m1.group(1), docs)
             wd = wd_map.get(m1.group(2))
@@ -399,13 +400,14 @@ def parse_command_local(cmd, year, month, docs, assts):
             acts.append({"action": "assign_assistant_to_doctor", "doctor": doc, "assistant": asst, "weekday": wd, "shift": shift})
             continue
             
-        # Rule 2: 特定第幾個星期幾上班/休假 (例: 欣霓第2個星期六早午上班)
-        m2 = re.search(r'([^\s]+?)\s*第\s*(\d+)\s*個(?:星期|禮拜)([一二三四五六日天])\s*(整天|早上|下午|晚上|早|午|晚|早午|早午晚)?\s*(上班|排班|休假|請假|休息)', line)
+        # Rule 2: 特定第幾個星期幾上班/休假 (加強彈性支援)
+        m2 = re.search(r'([^\s\d\(\)]+?)(?:醫師)?\s*第\s*(\d+)\s*[個]*\s*(?:星期|禮拜|週|周)([一二三四五六日天1-7])\s*(整天|早上|下午|晚上|早午晚|早午|午晚|早晚|早|午|晚)?\s*(?:要|想)?(?:休假|請假|排班|上班|休息)', line)
         if m2:
             person = fuzzy_match_person(m2.group(1), assts + docs)
             w_num = int(m2.group(2)); wd = wd_map.get(m2.group(3))
             sh_str = m2.group(4) or "整天"
-            act_type = "leave" if any(x in m2.group(5) for x in ["休", "請", "息"]) else "force_assign"
+            # 以整行內容檢查動作
+            act_type = "leave" if any(x in line for x in ["休", "請", "息"]) else "force_assign"
             shifts = []
             if "早" in sh_str or "整" in sh_str: shifts.append("早")
             if "午" in sh_str or "整" in sh_str or "下" in sh_str: shifts.append("午")
@@ -416,13 +418,19 @@ def parse_command_local(cmd, year, month, docs, assts):
                 else: acts.append({"action": act_type, "assistant": person, "weekday": wd, "week_number": w_num, "shift": s})
             continue
 
-        # Rule 3: 升級版！精準抓取日期+星期+時段 (例: 欣霓4/11星期六早午上班)
-        m3 = re.search(r'([^\s]+?)(?:醫師)?\s*(?:於)?\s*(\d+)[月/](\d+)[號日]?\s*(?:星期|禮拜)?([一二三四五六日天])?\s*(早上|下午|晚上|早午晚|早午|午晚|早晚|早|午|晚|整天)?\s*(?:要|想)?(休假|請假|排班|上班|休息)', line)
-        if m3:
-            person = fuzzy_match_person(m3.group(1), assts + docs)
-            date_str = f"{year}-{int(m3.group(2)):02d}-{int(m3.group(3)):02d}"
-            sh_str = m3.group(5) or "整天"
-            act_type = "leave" if any(x in m3.group(6) for x in ["休", "請", "息"]) else "force_assign"
+        # Rule 3: 終極升級版！完全容忍符號、括號與前後順序對調
+        m3 = re.search(r'([^\s\d\(\)]+?)(?:醫師)?\s*(?:於)?\s*(\d+)[月/.-]\s*(\d+)[號日]?\s*(?:\(?\s*(?:星期|禮拜|週|周)?\s*([一二三四五六日天1-7])\s*\)?)?\s*(整天|早上|下午|晚上|早午晚|早午|午晚|早晚|早|午|晚)?\s*(?:要|想)?(休假|請假|排班|上班|休息)', line)
+        m3_rev = re.search(r'(\d+)[月/.-]\s*(\d+)[號日]?\s*(?:\(?\s*(?:星期|禮拜|週|周)?\s*([一二三四五六日天1-7])\s*\)?)?\s*(?:由|讓|是)?\s*([^\s\d\(\)]+?)(?:醫師)?\s*(整天|早上|下午|晚上|早午晚|早午|午晚|早晚|早|午|晚)?\s*(?:要|想)?(休假|請假|排班|上班|休息)', line)
+        
+        if m3 or m3_rev:
+            if m3:
+                person_str = m3.group(1); m_str = m3.group(2); d_str = m3.group(3); sh_str = m3.group(5) or "整天"; act_str = m3.group(6)
+            else:
+                m_str = m3_rev.group(1); d_str = m3_rev.group(2); person_str = m3_rev.group(4); sh_str = m3_rev.group(5) or "整天"; act_str = m3_rev.group(6)
+                
+            person = fuzzy_match_person(person_str, assts + docs)
+            date_str = f"{year}-{int(m_str):02d}-{int(d_str):02d}"
+            act_type = "leave" if any(x in act_str for x in ["休", "請", "息"]) else "force_assign"
             shifts = []
             if "早" in sh_str or "整" in sh_str: shifts.append("早")
             if "午" in sh_str or "整" in sh_str or "下" in sh_str: shifts.append("午")
@@ -873,7 +881,7 @@ elif step == "7. 排班微調":
                 
         if "本地關鍵字" in mode:
             st.info("💡 **支援的關鍵字句型：**\n1. `XX醫師禮拜X[早上/下午/晚上/整天]給YY跟`\n2. `XX第N個星期X[早午/晚/整天]上班/休假`\n3. `XX[於]M月D日[星期X][早上/下午/晚上/整天]請假/上班` (例: 欣霓4/11星期六早午上班)")
-            cmd = st.text_area("請輸入指令 (可換行輸入多筆)", placeholder="峻豪醫師禮拜四整天給昀霏跟\n欣霓第2個星期六早午上班\n雯萱第3個星期六休假\n燿東醫師4月10號要請假")
+            cmd = st.text_area("請輸入指令 (可換行輸入多筆)", placeholder="峻豪醫師禮拜四整天給昀霏跟\n欣霓第2個星期六早午上班\n雯萱第3個星期六休假\n燿東醫師4/10號要請假")
             if st.button("執行本地調整"):
                 if cmd:
                     with st.spinner("系統極速解析中..."):
