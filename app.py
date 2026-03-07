@@ -179,3 +179,14 @@ def to_excel_individual(schedule_result, year, month, assts, docs):
     writer.close(); output.seek(0); return output
 
 def to_excel_doctor_confirmed(manual_schedule, year, month, doc_name):
+    output = io.BytesIO(); writer = pd.ExcelWriter(output, engine='xlsxwriter'); workbook = writer.book
+    fmts = get_excel_formats(workbook); dates = generate_month_dates(year, month)
+    s = workbook.add_worksheet("確認班表")
+    s.merge_range(0, 0, 0, 4, f"{doc_name} - {year}/{month} 班表", fmts['h_title_big'])
+    for i, h in enumerate(["日期","星期","早","午","晚"]): s.write(2, i, h, fmts['h_col'])
+    for r, dt in enumerate(dates):
+        s.write(r+3, 0, f"{dt.month}/{dt.day}", fmts['c_norm']); s.write(r+3, 1, ['一','二','三','四','五','六'][dt.weekday()], fmts['c_norm'])
+        for ci, sh in enumerate(["早","午","晚"]):
+            is_wk = any(x for x in manual_schedule if x["Date"]==str(dt) and x["Shift"]==sh and x["Doctor"]==doc_name)
+            s.write(r+3, 2+ci, "看診" if is_wk else "", fmts['c_norm'])
+    writer.close(); output.seek(0); return output
