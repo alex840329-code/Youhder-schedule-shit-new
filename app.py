@@ -9,6 +9,7 @@ import collections
 import random
 import requests
 import time
+import re
 from datetime import datetime, date, timedelta
 
 # 嘗試匯入專業表格套件
@@ -19,15 +20,14 @@ except ImportError:
     HAS_AGGRID = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v21.1 (精準過濾與排班強化版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v21.2 (終極邏輯優化版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 if not HAS_AGGRID:
-    st.error("🚨 **系統升級通知：需要安裝專業表格套件！** 🚨")
-    st.markdown("👉 **請確認您的 `requirements.txt` 中包含 `streamlit-aggrid` 與 `requests`**")
+    st.error("🚨 系統錯誤：請在 requirements.txt 加入 streamlit-aggrid 🚨")
     st.stop()
 
-# === 外觀鎖定區 (AgGrid 雙層漸層樣式) ===
+# === 全域樣式鎖定 ===
 st.markdown("""
 <style>
     .ag-header-group-cell-label { justify-content: center !important; font-size: 15px !important; font-weight: bold !important; color: #000 !important; }
@@ -37,7 +37,7 @@ st.markdown("""
     .header-disabled { background-color: #e0e0e0 !important; border-right: 2px solid #333 !important; }
     .ag-cell-wrapper { display: flex; justify-content: center; align-items: center; height: 100%; width: 100%; }
     
-    /* 本日休假清單樣式 */
+    /* 休息名單樣式：排除請假者 */
     .off-staff-box {
         background-color: #ffffff;
         border: 1px solid #ffcccc;
@@ -48,6 +48,9 @@ st.markdown("""
         border-radius: 4px;
         color: #333;
     }
+    
+    /* 隱藏 Streamlit 預設間距讓表格看起來更大 */
+    .block-container { padding-top: 2rem; padding-bottom: 2rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -78,7 +81,7 @@ function(params) {
 }
 """)
 
-# --- 全域提示系統 ---
+# --- 全域成功提示 ---
 if "sys_msg" in st.session_state:
     st.success(st.session_state["sys_msg"])
     del st.session_state["sys_msg"]
@@ -116,7 +119,7 @@ if 'config' not in st.session_state:
     if st.session_state.config.get("saved_result"):
         st.session_state.result = st.session_state.config["saved_result"]
 
-# --- 2. 輔助功能 ---
+# --- 2. 輔助函數 ---
 def get_active_doctors():
     raw = st.session_state.config.get("doctors_struct") or []
     return [d for d in sorted([x for x in raw if isinstance(x, dict)], key=lambda x: x.get("order", 99)) if d.get("active", True)]
@@ -171,7 +174,7 @@ def parse_slot_string(text, is_fixed=False):
         if wd is not None and sh is not None: res_set.add((wd, sh))
     return res_set
 
-# --- 3. 核心演算法 (強化正職診數保障與週六邏輯) ---
+# --- 3. 終極排班演算法 (雯萱保障、週六保休、雙櫃優先) ---
 def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_count, flt_count):
     assts = get_active_assistants(); docs = get_active_doctors()
     year = st.session_state.config.get("year", datetime.today().year)
@@ -185,7 +188,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         nm = a["name"]
         if a.get("type") == "全職":
             p_limits[nm] = std_max
-            p_targets[nm] = std_max # 正職目標設為最大值，強化追診邏輯
+            p_targets[nm] = std_max # 正職強迫補滿
         else:
             lim = a.get("custom_max") or 15
             p_limits[nm] = lim; p_targets[nm] = lim
@@ -203,6 +206,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         if r.get("fixed_slots"): parsed_fixed[name] = parse_slot_string(r["fixed_slots"], is_fixed=True)
         if r.get("admin_slots"): parsed_admin[name] = parse_slot_string(r["admin_slots"], is_fixed=False)
 
+    # 1. 處理固定班
     for slot in slots:
         dt_str, sh = slot.split("_"); wd = datetime.strptime(dt_str, "%Y-%m-%d").date().weekday()
         for name, fix_map in parsed_fixed.items():
@@ -214,6 +218,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         for name, admin_set in parsed_admin.items():
             if (wd, sh) in admin_set: p_counts[name] += 1; p_daily[name][dt_str].add(sh)
 
+    # 2. 正式排班循環
     for slot in slots:
         dt_str, sh = slot.split("_"); curr_dt = datetime.strptime(dt_str, "%Y-%m-%d").date(); wd = curr_dt.weekday()
         duty_docs = [x["Doctor"] for x in manual_schedule if x["Date"]==dt_str and x["Shift"]==sh]
@@ -230,12 +235,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             rule = adv_rules.get(name, {})
             if rule.get("role_limit") == "僅櫃台" and role != "counter": return False
             if rule.get("role_limit") == "僅流動" and role != "floater": return False
-            if rule.get("role_limit") == "僅跟診" and role != "doctor": return False
-            if rule.get("shift_limit") == "僅早班" and sh != "早": return False
-            if rule.get("shift_limit") == "僅午班" and sh != "午": return False
             if rule.get("shift_limit") == "僅晚班" and sh != "晚": return False
-            s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
-            if s_wl and (wd, sh) not in s_wl: return False
             if role == "counter":
                 for av in [x.strip() for x in rule.get("avoid", "").split(",") if x.strip()]:
                     if av in slot_res["counter"]: return False
@@ -246,27 +246,31 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             for c in candidates:
                 if not can_assign(c, r_type): continue
                 asst_info = next((a for a in assts if a["name"] == c), {})
-                # --- 核心：強大的診數缺口權重，保障正職診數 ---
+                
+                # 終極權重：診數缺口 (Gap)
                 gap = p_targets[c] - p_counts[c]
-                score = gap * 100 # 大幅提高缺口權重
+                score = gap * 1000 # 補滿診數是第一要務
                 
                 if r_type == "counter":
-                    if asst_info.get("type") == "全職" and asst_info.get("is_main_counter"): score += 5000 # 保障雯萱優先櫃檯
-                    elif asst_info.get("type") == "兼職": score += 3000
+                    if asst_info.get("is_main_counter"): score += 5000 # 櫃檯主力優先
+                    if asst_info.get("type") == "全職": score += 2000
                 
                 if r_type == "floater":
-                    if asst_info.get("is_main_counter"): score -= 2000
-                    else: score += (30 - p_floater_counts[c]) * 40 # 強化平均分配
+                    if asst_info.get("is_main_counter"): score -= 2000 # 專職櫃檯不排流動
+                    else: score += (30 - p_floater_counts[c]) * 100 # 強力平衡流動
                 
-                if wd == 5: # 週六邏輯
+                if wd == 5: # 週六規則：確保正職上班，並強迫休一天
                     has_off_sat = any(not p_daily[c][sd] for sd in sat_dates if sd != dt_str)
-                    if not has_off_sat and sat_dates.index(dt_str) >= len(sat_dates) - 2: score -= 10000 # 強保休
+                    if not has_off_sat and sat_dates.index(dt_str) >= len(sat_dates) - 2:
+                        score -= 20000 # 月底強迫保休
+                    if asst_info.get("type") == "全職": score += 8000 # 週六正職優先上線
                 
                 scored.append((c, score + random.random()))
             scored.sort(key=lambda x: x[1], reverse=True)
             return [x[0] for x in scored]
 
         cand_pool = [a["name"] for a in assts]
+        # 跟診
         for d_name in duty_docs:
             picked = None; targets = [pairing_matrix.get(d_name, {}).get(k) for k in ["1","2","3"]]
             for t in [x for x in targets if x]:
@@ -275,11 +279,13 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 for c in calculate_priority(cand_pool, "doctor"): picked = c; break
             if picked: slot_res["doctors"][d_name] = picked; p_counts[picked] += 1; p_daily[picked][dt_str].add(sh)
             
+        # 櫃檯 (強勢填滿，兩位以上櫃檯需求)
         needed_ctr = ctr_count - len(slot_res["counter"])
         for c in calculate_priority(cand_pool, "counter"):
             if needed_ctr <= 0: break
             slot_res["counter"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); needed_ctr -= 1
             
+        # 流動
         needed_flt = flt_count - len(slot_res["floater"])
         for c in calculate_priority(cand_pool, "floater"):
             if needed_flt <= 0: break
@@ -287,21 +293,20 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             
     return result
 
-# --- 4. API 呼叫 ---
+# --- 4. API 解析 ---
 def call_gemini_api(api_key, model_name, prompt):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    for delay in [2, 4, 8]:
-        try:
-            resp = requests.post(url, json=payload, timeout=25); data = resp.json()
-            if resp.status_code == 200 and 'candidates' in data:
-                return data['candidates'][0]['content']['parts'][0]['text']
-            elif resp.status_code == 429: time.sleep(delay); continue
-            else: return f"ERROR:{data.get('error', {}).get('message', '未知錯誤')}"
-        except: time.sleep(delay); continue
-    return "ERROR:API 連線失敗，請稍後再試。"
+    try:
+        resp = requests.post(url, json=payload, timeout=25); data = resp.json()
+        if resp.status_code == 200 and 'candidates' in data:
+            return data['candidates'][0]['content']['parts'][0]['text']
+        else:
+            return f"ERROR:{data.get('error', {}).get('message', 'API 忙碌中或 Key 錯誤')}"
+    except:
+        return "ERROR:連線逾時，請再試一次。"
 
-# --- 5. Excel 輸出 (略, 同前) ---
+# --- 5. Excel 輸出 ---
 def to_excel_master(schedule_result, year, month, docs, assts):
     output = io.BytesIO(); writer = pd.ExcelWriter(output, engine='xlsxwriter'); workbook = writer.book
     fmts = get_excel_formats(workbook); sheet = workbook.add_worksheet("總班表")
@@ -309,7 +314,7 @@ def to_excel_master(schedule_result, year, month, docs, assts):
     for dt in dates: weeks[dt.isocalendar()[1]].append(dt)
     row = 0
     for wk_id, w_dates in enumerate(weeks.values()):
-        sheet.merge_range(row, 0, row, len(w_dates)*3, f"祐德牙醫 {year}年{month}月 - 第 {wk_id+1} 週", fmts['h_title']); row += 1
+        sheet.merge_range(row, 0, row, len(w_dates)*3, f"祐德牙醫 {year}年{month}月 班表", fmts['h_title']); row += 1
         sheet.write(row, 0, "日期", fmts['h_col']); col = 1
         for dt in w_dates:
             sheet.merge_range(row, col, row, col+2, f"{dt.month}/{dt.day} ({['一','二','三','四','五','六'][dt.weekday()]})", fmts['h_col']); col += 3
@@ -326,7 +331,7 @@ def to_excel_master(schedule_result, year, month, docs, assts):
                     k = f"{dt}_{s}"; anm = schedule_result.get(k, {}).get("doctors", {}).get(doc["name"], "")
                     sheet.write(row, col, next((a["nick"] for a in assts if a["name"]==anm), ""), f); col += 1
             row += 1
-        for rnm, rk, ri in [("櫃台1","counter",0), ("櫃台2","counter",1), ("流動","floater",0), ("看/行","look",0)]:
+        for rnm, rk, ri in [("櫃1","counter",0), ("櫃2","counter",1), ("流動","floater",0), ("看/行","look",0)]:
             sheet.write(row, 0, rnm, fmts['h_col']); col = 1
             for dt in w_dates:
                 f = fmts['c_wknd'] if dt.weekday() == 5 else fmts['c_norm']
@@ -390,7 +395,7 @@ is_locked_system = st.session_state.config.get("is_locked", False)
 
 with st.sidebar:
     st.subheader("⚙️ 系統管理")
-    lock_val = st.toggle("🔒 鎖定前台", value=is_locked_system)
+    lock_val = st.toggle("🔒 鎖定前台修改", value=is_locked_system)
     if lock_val != is_locked_system: st.session_state.config["is_locked"] = lock_val; save_config(st.session_state.config); st.rerun()
 
     st.divider()
@@ -400,7 +405,7 @@ with st.sidebar:
     with t_logic:
         logic_keys = ["doctors_struct", "assistants_struct", "pairing_matrix", "adv_rules", "template_odd", "template_even"]
         st.download_button("📥 下載基本邏輯", json.dumps({k:st.session_state.config.get(k) for k in logic_keys}, ensure_ascii=False, indent=4), f"yude_logic_{datetime.now().strftime('%Y%m%d')}.json", "application/json", use_container_width=True)
-        ul = st.file_uploader("📤 還原邏輯", type="json")
+        ul = st.file_uploader("📤 還原邏輯", type="json", key="ulogic")
         if ul and st.button("確認還原邏輯", use_container_width=True):
             try:
                 new = json.load(ul); d_cfg = get_default_config()
@@ -415,7 +420,7 @@ with st.sidebar:
         month_keys = ["year", "month", "manual_schedule", "leaves", "saved_result"]
         if st.session_state.get("result"): st.session_state.config["saved_result"] = st.session_state.result
         st.download_button("📥 下載當月班表", json.dumps({k:st.session_state.config.get(k) for k in month_keys}, ensure_ascii=False, indent=4), f"yude_month_{y_cfg}_{m_cfg}_backup.json", "application/json", use_container_width=True)
-        um = st.file_uploader("📤 還原班表", type="json")
+        um = st.file_uploader("📤 還原班表", type="json", key="umonth")
         if um and st.button("確認還原班表", use_container_width=True):
             try:
                 new = json.load(um); d_cfg = get_default_config()
@@ -425,23 +430,27 @@ with st.sidebar:
             except: st.error("還原失敗")
     
     st.divider()
-    st.subheader("🔍 AI 分析專用導出")
+    st.subheader("🔍 AI 分析導出")
     if st.button("生成分析文字"):
         st.text_area("複製給 AI：", json.dumps({"rules":st.session_state.config.get("adv_rules"),"matrix":st.session_state.config.get("pairing_matrix"),"manual":st.session_state.config.get("manual_schedule"),"leaves":st.session_state.config.get("leaves")}, ensure_ascii=False))
 
 step = st.sidebar.radio("導覽", ["1. 人員設定", "2. 跟診配對", "3. 進階限制", "4. 班表生成", "5. 醫師入口", "6. 助理入口", "7. 排班微調", "8. 報表下載"])
 
+def safe_index(options, value, default=0):
+    try: return options.index(value)
+    except: return default
+
 if step == "1. 人員設定":
     st.header("人員設定")
     y, m = st.session_state.config.get("year"), st.session_state.config.get("month")
     min_s, max_s = calculate_shift_limits(y, m)
-    st.info(f"📅 {y}/{m} ｜ 全職標準：上限 {max_s}，基本 {min_s}")
+    st.info(f"📅 {y}/{m} ｜ 正職上限：{max_s}")
     c1, c2 = st.columns(2)
     with c1:
         ed_doc = st.data_editor(pd.DataFrame(st.session_state.config.get("doctors_struct", [])), use_container_width=True, hide_index=True, num_rows="dynamic")
         if st.button("存醫師"): st.session_state.config["doctors_struct"] = ed_doc.to_dict('records'); save_config(st.session_state.config); st.rerun()
     with c2:
-        ed_asst = st.data_editor(pd.DataFrame(st.session_state.config.get("assistants_struct", [])), column_config={"type": st.column_config.SelectboxColumn(options=["全職","兼職"]), "pref": st.column_config.SelectboxColumn(options=["high","normal","low"])}, use_container_width=True, hide_index=True, num_rows="dynamic")
+        ed_asst = st.data_editor(pd.DataFrame(st.session_state.config.get("assistants_struct", [])), column_config={"type": st.column_config.SelectboxColumn(options=["全職","兼職"]), "pref": st.column_config.SelectboxColumn(options=["high","normal","low"]), "is_main_counter": st.column_config.CheckboxColumn("專職櫃台?")}, use_container_width=True, hide_index=True, num_rows="dynamic")
         if st.button("存助理"): st.session_state.config["assistants_struct"] = ed_asst.replace({np.nan: None}).to_dict('records'); save_config(st.session_state.config); st.rerun()
 
 elif step == "2. 跟診配對":
@@ -465,8 +474,8 @@ elif step == "3. 進階限制":
         nm = a["name"]; r = curr_rules.get(nm, {})
         c1, c2, c3, c4, c5, c6 = st.columns([1, 1.5, 1.5, 2.5, 1.5, 1.5])
         c1.markdown(f"**{nm}**")
-        rv = c2.selectbox("職位", r_opts, index=r_opts.index(r.get("role_limit", "無限制")) if r.get("role_limit") in r_opts else 0, key=f"r_{nm}", label_visibility="collapsed")
-        sv = c3.selectbox("班別", s_opts, index=s_opts.index(r.get("shift_limit", "無限制")) if r.get("shift_limit") in s_opts else 0, key=f"s_{nm}", label_visibility="collapsed")
+        rv = c2.selectbox("職位", r_opts, index=safe_index(r_opts, r.get("role_limit", "無限制")), key=f"r_{nm}", label_visibility="collapsed")
+        sv = c3.selectbox("班別", s_opts, index=safe_index(s_opts, r.get("shift_limit", "無限制")), key=f"s_{nm}", label_visibility="collapsed")
         others = [x["name"] for x in assts if x["name"] != nm]
         av = c4.multiselect("避開", others, default=[x.strip() for x in r.get("avoid","").split(",") if x.strip() in others], key=f"v_{nm}", label_visibility="collapsed")
         with c5.popover("📅 白名單"):
@@ -504,7 +513,7 @@ elif step == "4. 班表生成":
         for i, dn in enumerate(days):
             child = [{"headerName": sn, "field": f"{dn}_{sn}", "editable": True, "cellEditor": "agCheckboxCellEditor", "cellRenderer": "agCheckboxCellRenderer", "cellClass": "is_odd" if i%2==0 else "is_even", "cellStyle": cell_style_js, "width": 55} for sn in ["早","午","晚"]]
             cd.append({"headerName": f"星期{dn}", "children": child, "headerClass": "header-odd" if i%2==0 else "header-even"})
-        res = AgGrid(pd.DataFrame(rows), gridOptions={"columnDefs": cd, "rowHeight": 45}, allow_unsafe_jscode=True, update_mode=GridUpdateMode.MODEL_CHANGED, theme="alpine", key=f"ag_{key}")
+        res = AgGrid(pd.DataFrame(rows), gridOptions={"columnDefs": cd, "rowHeight": 45, "domLayout": 'autoHeight'}, allow_unsafe_jscode=True, update_mode=GridUpdateMode.MODEL_CHANGED, theme="alpine", key=f"ag_{key}")
         if res['data'] is not None:
             nr = {}; rd = res['data'].to_dict('records') if isinstance(res['data'], pd.DataFrame) else res['data']
             for row in rd:
@@ -536,8 +545,7 @@ elif step == "5. 醫師入口":
         p_weeks = get_padded_weeks(y, m); eds = []
         for wi, w_dates in enumerate(p_weeks):
             st.markdown(f"**第 {wi+1} 週**")
-            cols = [d["disp"] for d in w_dates]; rows = []
-            cmap = {d["disp"]: d["str"] for d in w_dates if d["is_curr"]}
+            cols = [d["disp"] for d in w_dates]; cmap = {d["disp"]: d["str"] for d in w_dates if d["is_curr"]}; rows = []
             for sn in ["早","午","晚"]:
                 r = {"時段": sn}
                 for c in cols: r[c] = any(x for x in manual if x["Date"]==cmap.get(c) and x["Shift"]==sn and x["Doctor"]==sel_doc)
@@ -552,7 +560,6 @@ elif step == "5. 醫師入口":
                     for disp, dt_str in cmap.items():
                         if df_out.at[sn, disp]: new_man.append({"Date": dt_str, "Shift": sn, "Doctor": sel_doc})
             st.session_state.config["manual_schedule"] = new_man; save_config(st.session_state.config); st.rerun()
-        st.download_button("📥 下載確認版", to_excel_doctor_confirmed(manual, y, m, sel_doc), f"{sel_doc}_{m}月班表.xlsx", use_container_width=True)
 
 elif step == "6. 助理入口":
     st.header("👩‍⚕️ 助理入口")
@@ -561,8 +568,7 @@ elif step == "6. 助理入口":
     leaves = st.session_state.config.get("leaves", {}); p_weeks = get_padded_weeks(y, m); eds = []
     for wi, w_dates in enumerate(p_weeks):
         st.markdown(f"**第 {wi+1} 週**")
-        cols = [d["disp"] for d in w_dates]; rows = []
-        cmap = {d["disp"]: d["str"] for d in w_dates if d["is_curr"]}
+        cols = [d["disp"] for d in w_dates]; cmap = {d["disp"]: d["str"] for d in w_dates if d["is_curr"]}; rows = []
         for sn in ["早","午","晚"]:
             r = {"時段": sn}
             for c in cols: r[c] = leaves.get(f"{sel_asst}_{cmap.get(c)}_{sn}", False)
@@ -579,9 +585,10 @@ elif step == "6. 助理入口":
         st.session_state.config["leaves"] = new_leaves; save_config(st.session_state.config); st.rerun()
 
 elif step == "7. 排班微調":
-    st.header("智慧排班與微調助手")
     y, m = st.session_state.config.get("year"), st.session_state.config.get("month"); dates = generate_month_dates(y, m)
     std_min, std_max = calculate_shift_limits(y, m); assts = get_active_assistants(); sat_dates = [str(dt) for dt in dates if dt.weekday() == 5]
+    
+    st.title(f"📅 {y} 年 {m} 月 班表總管")
     
     with st.sidebar:
         st.markdown("---")
@@ -595,7 +602,7 @@ elif step == "7. 排班微調":
                     curr_counts[p] += 1; daily_p[p][dt_str].add(sh)
                     if p in v["floater"]: curr_floaters[p] += 1
             for a in assts:
-                nm = a["name"]; status_color = "green" if std_min <= curr_counts[nm] <= std_max else "red"
+                nm = a["name"]; status_color = "green" if curr_counts[nm] >= std_min else "red"
                 triples = sum(1 for s_set in daily_p[nm].values() if len(s_set) == 3)
                 heaven_earth = sum(1 for s_set in daily_p[nm].values() if "早" in s_set and "晚" in s_set and "午" not in s_set)
                 s_off, s_nite, s_day = 0, 0, 0
@@ -608,61 +615,63 @@ elif step == "7. 排班微調":
                 st.markdown(f"- 總診: :{status_color}[{curr_counts[nm]}] | **流: {curr_floaters[nm]}**")
                 s_status = "✅" if s_off >= 1 and s_nite == 1 else "⚠️"
                 st.caption(f"- {s_status} 週六: 休{s_off}|早午{s_day}|晚{s_nite}")
-                if triples > 0 or heaven_earth > 0: st.markdown(f"- 🚩 :orange[全:{triples}] | :red[天:{heaven_earth}]")
+                if triples > 0 or heaven_earth > 0: st.markdown(f"- 🚩 :orange[全診:{triples}] | :red[天地:{heaven_earth}]")
                 st.markdown("---")
 
-    c1, c2 = st.columns(2); ctr = c1.slider("櫃台數", 1,3,2); flt = c2.slider("流動數",0,3,1)
-    if st.button("🚀 執行自動排班", type="primary"):
-        with st.spinner("演算法運算中..."):
+    c1, c2 = st.columns(2); ctr = c1.slider("櫃台需求人數", 1,3,2); flt = c2.slider("流動需求人數",0,3,1)
+    if st.button("🚀 執行自動排班演算法", type="primary"):
+        with st.spinner("終極演算法運算中..."):
             res = run_auto_schedule(st.session_state.config["manual_schedule"], st.session_state.config["leaves"], st.session_state.config.get("pairing_matrix",{}), st.session_state.config.get("adv_rules",{}), ctr, flt)
             st.session_state.result = res; st.session_state.config["saved_result"] = res; save_config(st.session_state.config); st.rerun()
             
     if 'result' in st.session_state:
-        with st.expander("🤖 Gemini AI 指令助手", expanded=False):
+        with st.expander("🤖 Gemini AI 指令助手 (v2.0 穩定版)", expanded=False):
             api_key = st.text_input("Gemini API Key", value=st.session_state.config.get("api_key",""), type="password")
             cmd = st.text_area("口語指令", placeholder="Ex: 峻豪醫師禮拜四整天昀霏跟診")
-            if st.button("執行調整"):
+            if st.button("執行 AI 調整"):
                 if api_key:
                     st.session_state.config["api_key"] = api_key; save_config(st.session_state.config)
-                    with st.spinner("AI 解析中..."):
+                    with st.spinner("AI 思考中..."):
                         docs_str = ",".join([d["name"] for d in get_active_doctors()]); asst_str = ",".join([a["name"] for a in get_active_assistants()])
-                        prompt = f"牙醫排班年月:{y}/{m}。醫師:{docs_str}。助理:{asst_str}。轉JSON動作。格式:[{{'doctor': 'NAME', 'assistant': 'NAME', 'weekday': 1-6, 'shift': '早/午/晚/null'}}]。指令:{cmd}"
+                        prompt = f"牙醫排班年月:{y}/{m}。醫師:{docs_str}。助理:{asst_str}。轉JSON。格式:[{{'doctor': 'NAME', 'assistant': 'NAME', 'weekday': 1-6, 'shift': '早/午/晚/null'}}]。指令:{cmd}"
                         raw = call_gemini_api(api_key, "gemini-2.0-flash", prompt)
                         if raw.startswith("ERROR:"): st.error(f"API 異常: {raw[6:]}")
                         else:
                             try:
-                                acts = json.loads(raw.strip().replace("```json", "").replace("```", "").strip()); er = st.session_state.result.copy()
+                                # 清除可能的 Markdown 標籤
+                                clean_json = re.sub(r'```json\s*|\s*```', '', raw).strip()
+                                acts = json.loads(clean_json); er = st.session_state.result.copy()
                                 for act in acts:
                                     for k, v in er.items():
                                         ds, sh = k.split("_"); dt_obj = datetime.strptime(ds, "%Y-%m-%d").date()
                                         if act.get("weekday") and (dt_obj.weekday()+1) != act["weekday"]: continue
                                         if act.get("shift") and sh != act["shift"]: continue
                                         if act.get("doctor") in v["doctors"]:
-                                            v["doctors"][act["doctor"]] = act["assistant"]
-                                            for ky in ["counter", "floater"]: v[ky] = [x if x != act["assistant"] else "" for x in v[ky]]
-                                st.session_state.result = er; st.rerun()
-                            except: st.error("解析失敗")
+                                            asst_name = act["assistant"]
+                                            v["doctors"][act["doctor"]] = asst_name
+                                            for ky in ["counter", "floater"]: v[ky] = [x if x != asst_name else "" for x in v[ky]]
+                                st.session_state.result = er; st.session_state["sys_msg"] = "✅ AI 已完成調整！"; st.rerun()
+                            except: st.error("AI 回傳格式解析失敗，請再試一次。")
 
-        docs = get_active_doctors(); p_weeks = get_padded_weeks(y, m); a_opts = [""] + [a["nick"] for a in assts]
-        nm2n = {a["name"]: a["nick"] for a in assts}; n2nm = {a["nick"]: a["name"] for a in assts}
-        
-        # 預計算：本日休息人員 (排除已填寫請假的人)
+        docs = get_active_doctors(); p_weeks = get_padded_weeks(y, m); a_opts = [""] + [a["nick"] for a in get_active_assistants()]
+        nm2n = {a["name"]: a["nick"] for a in get_active_assistants()}; n2nm = {a["nick"]: a["name"] for a in get_active_assistants()}
         leaves_data = st.session_state.config.get("leaves", {})
-        daily_off_staff = {}
-        for w_dates in p_weeks:
-            for dt in w_dates:
-                if not dt["is_curr"]: continue
-                d_str = dt["str"]; working = set()
-                for sh in ["早","午","晚"]:
-                    data = st.session_state.result.get(f"{d_str}_{sh}", {})
-                    working.update(list(data.get("doctors", {}).values()) + data.get("counter", []) + data.get("floater", []) + data.get("look", []))
-                
-                # 名單 = 沒排班的人 - 當天有請假的人
-                daily_off_staff[d_str] = [a["name"] for a in assts if a["name"] not in working and not any(leaves_data.get(f"{a['name']}_{d_str}_{sh}") for sh in ["早","午","晚"])]
-
-        with st.form("adj"):
+        
+        with st.form("adj_form"):
             for wi, w_dates in enumerate(p_weeks):
-                st.markdown(f"#### 第 {wi+1} 週")
+                # 預計算：本日休假與空閒名單 (排除已請假的人)
+                daily_off_staff = {}
+                for dt in w_dates:
+                    if not dt["is_curr"]: continue
+                    d_str = dt["str"]; working = set()
+                    for sh in ["早","午","晚"]:
+                        data = st.session_state.result.get(f"{d_str}_{sh}", {})
+                        working.update(list(data.get("doctors", {}).values()) + data.get("counter", []) + data.get("floater", []) + data.get("look", []))
+                    
+                    # 過濾：沒排班 且 當天沒填請假的人
+                    can_work = [a["name"] for a in get_active_assistants() if a["name"] not in working and not any(leaves_data.get(f"{a['name']}_{d_str}_{sh}") for sh in ["早","午","晚"])]
+                    daily_off_staff[d_str] = can_work
+
                 rows = []
                 for d in docs:
                     r = {"person": f"👨‍⚕️ {d['nick']}", "type":"doc", "name":d["name"]}
@@ -685,16 +694,19 @@ elif step == "7. 排班微調":
                 for dt in w_dates:
                     child = [{"headerName": s, "field": f"{dt['str']}_{s}", "editable": dt["is_curr"], "cellEditor": "agSelectCellEditor", "cellEditorParams": {"values": a_opts}, "cellClass": "is_odd" if dt["date"].weekday()%2==0 else "is_even", "cellStyle": cell_style_js, "width": 55} for s in ["早","午","晚"]]
                     cd.append({"headerName": dt["disp"], "children": child, "headerClass": "header-odd" if dt["date"].weekday()%2==0 else "header-even"})
-                AgGrid(pd.DataFrame(rows), gridOptions={"columnDefs": cd, "rowHeight": 40}, allow_unsafe_jscode=True, theme="alpine", key=f"ag_adj_{wi}")
                 
-                # 顯示：本日休息名單 (已精準過濾請假人員)
+                # 這裡表格高度設定為自動展開 (domLayout: 'autoHeight')
+                AgGrid(pd.DataFrame(rows), gridOptions={"columnDefs": cd, "rowHeight": 40, "domLayout": 'autoHeight'}, allow_unsafe_jscode=True, theme="alpine", key=f"ag_final_{wi}")
+                
+                # 休息名單欄位
                 off_cols = st.columns(len(w_dates))
                 for idx, dt in enumerate(w_dates):
                     if dt["is_curr"]:
                         off_nicks = [nm2n.get(n, n) for n in daily_off_staff.get(dt["str"], []) if n]
-                        off_cols[idx].markdown(f"""<div class="off-staff-box"><b>休：</b>{",".join(off_nicks) if off_nicks else "無"}</div>""", unsafe_allow_html=True)
+                        off_cols[idx].markdown(f"""<div class="off-staff-box"><b>有空：</b><br>{",".join(off_nicks) if off_nicks else "無"}</div>""", unsafe_allow_html=True)
+                st.markdown("<br>", unsafe_allow_html=True)
 
-            if st.form_submit_button("💾 同步畫面與儲存結果"):
+            if st.form_submit_button("💾 同步更新與儲存"):
                 st.session_state.config["saved_result"] = st.session_state.result; save_config(st.session_state.config); st.rerun()
 
 elif step == "8. 報表下載":
