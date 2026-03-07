@@ -255,8 +255,10 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             if wd == 5 and asst_info.get("type") == "全職":
                 sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[name][d])
                 if sh == "晚" and sat_nites >= 1: return False 
-                has_off_sat = any(not p_daily[name][sd] for sd in sat_dates if sd != dt_str)
-                if not has_off_sat and dt_str == sat_dates[-1]: return False 
+                
+                # 確保至少有一個完整的星期六休息 (整天都沒有班)
+                off_sats = [sd for sd in sat_dates if len(p_daily[name][sd]) == 0]
+                if len(off_sats) == 1 and off_sats[0] == dt_str: return False 
             
             if p_counts[name] >= p_limits[name] and wd != 5: return False 
             
@@ -295,7 +297,18 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                     if asst_info.get("is_main_counter"): score -= 100000 
                     else: score += (30 - p_floater_counts[c]) * 500 
                 
-                if wd == 5 and asst_info.get("type") == "全職": score += 15000
+                if wd == 5 and asst_info.get("type") == "全職": 
+                    score += 15000
+                    
+                    # === 加入排班鐵律的防呆懲罰 (給 Phase 3 填洞時參考) ===
+                    # 即便是為了填補空缺，也極度避免違反全職人員的週末休息權益
+                    sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[c][d])
+                    if sh == "晚" and sat_nites >= 1:
+                        score -= 2000000  # 極度不想排第二個六晚
+                    
+                    off_sats = [sd for sd in sat_dates if len(p_daily[c][sd]) == 0]
+                    if len(off_sats) == 1 and off_sats[0] == dt_str:
+                        score -= 2000000  # 極度不想剝奪最後一個完整休假
                 
                 scored.append((c, score + random.random()))
             scored.sort(key=lambda x: x[1], reverse=True)
