@@ -24,7 +24,7 @@ except ImportError:
     HAS_AI_LIB = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v19.4 (備份防呆與寬欄版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v20.0 (分離備份與完美保存版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 # --- 阻擋未安裝套件的狀態 ---
@@ -174,7 +174,8 @@ def get_default_config():
         "month": datetime.today().month % 12 + 1,
         "manual_schedule": [], 
         "clinic_holidays": [], 
-        "leaves": {}
+        "leaves": {},
+        "saved_result": {} # 新增：用來將排班結果持久化存檔
     }
 
 def load_config():
@@ -204,8 +205,13 @@ def save_config(config):
             json.dump(config, f, ensure_ascii=False, indent=4)
     except Exception as e: st.error(f"存檔發生錯誤: {e}")
 
+# 初始化載入設定與排班結果
 if 'config' not in st.session_state:
     st.session_state.config = load_config()
+    # 如果有儲存過的排班微調結果，自動還原到 session_state 避免遺失
+    if "saved_result" in st.session_state.config and st.session_state.config["saved_result"]:
+        if 'result' not in st.session_state:
+            st.session_state.result = st.session_state.config["saved_result"]
 
 # --- 2. 日期與輔助函式 ---
 def get_active_doctors():
@@ -614,7 +620,7 @@ def to_excel_doctor_confirmed(manual_schedule, year, month, doc_name):
     return output
 
 # --- 7. UI 介面 ---
-st.title("🦷 祐德牙醫 - 智慧排班系統 v19.4 (備份防呆與寬欄版)")
+st.title("🦷 祐德牙醫 - 智慧排班系統 v19.4 (備份防呆版)")
 
 is_locked_system = st.session_state.config.get("is_locked", False)
 
@@ -625,31 +631,48 @@ with st.sidebar:
     if new_lock_state != is_locked_system:
         st.session_state.config["is_locked"] = new_lock_state; save_config(st.session_state.config); st.rerun()
 
+    # === 分離式備份系統 ===
     st.divider()
-    st.subheader("💾 系統資料備份與還原")
-    st.info("💡 雲端伺服器(GitHub)重啟會導致資料遺失。請養成定期下載備份的習慣！")
+    st.subheader("💾 分離式資料備份與還原")
+    st.info("💡 雲端伺服器重啟會遺失資料。已將備份拆分為「基本邏輯」與「當月班表」，方便跨月沿用設定！")
     
-    # 下載備份 (JSON)
-    json_string = json.dumps(st.session_state.config, ensure_ascii=False, indent=4)
-    st.download_button(
-        label="📥 下載系統所有資料 (備份)",
-        file_name=f"yude_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-        mime="application/json",
-        data=json_string,
-    )
+    tab_logic, tab_month = st.tabs(["⚙️ 基本邏輯 (前4項)", "📅 當月班表 (後4項)"])
     
-    # 上傳還原 (JSON)
-    uploaded_file = st.file_uploader("📤 上傳備份檔 (還原)", type="json")
-    if uploaded_file is not None:
-        if st.button("⚠️ 確認還原 (將覆蓋現有資料)", type="primary"):
+    with tab_logic:
+        logic_data = {k: st.session_state.config.get(k) for k in ["doctors_struct", "assistants_struct", "pairing_matrix", "adv_rules", "template_odd", "template_even"]}
+        st.download_button("📥 下載【基本邏輯】備份檔", json.dumps(logic_data, ensure_ascii=False, indent=4), f"yude_logic_backup_{datetime.now().strftime('%Y%m%d')}.json", mime="application/json", use_container_width=True)
+        
+        up_logic = st.file_uploader("📤 上傳還原【基本邏輯】", type="json", key="up_logic")
+        if up_logic and st.button("⚠️ 確認還原邏輯", type="primary", use_container_width=True):
             try:
-                new_config = json.load(uploaded_file)
-                st.session_state.config = new_config
-                save_config(new_config)
-                st.session_state["sys_msg"] = "✅ 資料還原成功！"
+                new_logic = json.load(up_logic)
+                for k in ["doctors_struct", "assistants_struct", "pairing_matrix", "adv_rules", "template_odd", "template_even"]:
+                    if k in new_logic: st.session_state.config[k] = new_logic[k]
+                save_config(st.session_state.config)
+                st.session_state["sys_msg"] = "✅ 基本邏輯還原成功！"
                 st.rerun()
-            except Exception as e:
-                st.error(f"還原失敗，檔案格式不正確：{e}")
+            except:
+                st.error("檔案格式錯誤")
+                
+    with tab_month:
+        if 'result' in st.session_state:
+            st.session_state.config['saved_result'] = st.session_state.result
+        month_data = {k: st.session_state.config.get(k) for k in ["year", "month", "manual_schedule", "leaves", "saved_result"]}
+        st.download_button("📥 下載【當月班表】備份檔", json.dumps(month_data, ensure_ascii=False, indent=4), f"yude_month_backup_{datetime.now().strftime('%Y%m%d')}.json", mime="application/json", use_container_width=True)
+        
+        up_month = st.file_uploader("📤 上傳還原【當月班表】", type="json", key="up_month")
+        if up_month and st.button("⚠️ 確認還原班表", type="primary", use_container_width=True):
+            try:
+                new_month = json.load(up_month)
+                for k in ["year", "month", "manual_schedule", "leaves", "saved_result"]:
+                    if k in new_month: st.session_state.config[k] = new_month[k]
+                if "saved_result" in new_month and new_month["saved_result"]:
+                    st.session_state.result = new_month["saved_result"]
+                save_config(st.session_state.config)
+                st.session_state["sys_msg"] = "✅ 當月班表還原成功！"
+                st.rerun()
+            except:
+                st.error("檔案格式錯誤")
 
 step = st.sidebar.radio("導覽步驟", [
     "1. 系統與人員設定", "2. 醫師配對順位", "3. 助理進階限制", "4. 醫師範本與生成", 
@@ -819,7 +842,8 @@ elif step == "4. 醫師範本與生成":
             rows.append(row)
         df = pd.DataFrame(rows)
         
-        col_defs = [{"headerName": "醫師", "field": "doctor", "pinned": "left", "width": 140, "cellStyle": {"fontWeight": "bold", "borderRight": "2px solid #333", "backgroundColor": "#fff"}}]
+        # 欄寬增加為 130，以完整顯示醫師姓名
+        col_defs = [{"headerName": "醫師", "field": "doctor", "pinned": "left", "width": 130, "cellStyle": {"fontWeight": "bold", "borderRight": "2px solid #333", "backgroundColor": "#fff"}}]
         
         for i, d in enumerate(days):
             is_odd = (i % 2 == 0)
@@ -836,10 +860,8 @@ elif step == "4. 醫師範本與生成":
             
         go = {"columnDefs": col_defs, "defaultColDef": {"suppressMovable": True}, "rowHeight": 45, "headerHeight": 40}
         
-        # AgGrid 會自動在背景抓取最新的狀態
         res = AgGrid(df, gridOptions=go, allow_unsafe_jscode=True, fit_columns_on_grid_load=False, update_mode=GridUpdateMode.MODEL_CHANGED, theme="alpine", key=f"ag_{key}")
         
-        # 背景無縫更新 session_state，預防按鈕導致的 state loss
         grid_data = res['data']
         if grid_data is not None and len(grid_data) > 0:
             records = grid_data.to_dict('records') if isinstance(grid_data, pd.DataFrame) else grid_data
@@ -850,7 +872,6 @@ elif step == "4. 醫師範本與生成":
                 for d in days:
                     for s in ["早", "午", "晚"]:
                         val = row.get(f"星期{d}_{s}", False)
-                        # 避免 AgGrid 將 False 轉為字串 "false" 導致全選的 Bug
                         if isinstance(val, str): val = val.lower() == 'true'
                         vals.append(bool(val))
                 new_res[doc_clean] = vals
@@ -872,7 +893,6 @@ elif step == "4. 醫師範本與生成":
     if col_btn2.button("🚀 儲存範本並自動套用至本月", type="primary"):
         save_config(st.session_state.config)
         
-        # 自動執行生成初始班表的邏輯
         generated = []
         t_odd = st.session_state.config.get("template_odd", {})
         t_even = st.session_state.config.get("template_even", {})
@@ -948,6 +968,7 @@ elif step == "5. 👨‍⚕️ 醫師專屬入口":
             save_config(st.session_state.config)
             
             if 'result' in st.session_state: del st.session_state['result']
+            if 'saved_result' in st.session_state.config: del st.session_state.config['saved_result']
             st.session_state["sys_msg"] = f"✅ {selected_doc} 班表已儲存！"
             st.rerun()
             
@@ -1011,6 +1032,7 @@ elif step == "6. 👩‍⚕️ 助理專屬入口":
             save_config(st.session_state.config)
             
             if 'result' in st.session_state: del st.session_state['result']
+            if 'saved_result' in st.session_state.config: del st.session_state.config['saved_result']
             st.session_state["sys_msg"] = f"✅ {selected_asst} 休假已儲存！(請至步驟 7 重新執行排班套用最新假單)"
             st.rerun()
     else:
@@ -1027,6 +1049,8 @@ elif step == "7. 排班與總管微調":
             pair = st.session_state.config.get("pairing_matrix", {}); rules = st.session_state.config.get("adv_rules", {}) 
             res, counts, s_min, s_max = run_auto_schedule(man, lea, pair, rules, ctr, flt)
             st.session_state.result = res
+            st.session_state.config["saved_result"] = res
+            save_config(st.session_state.config)
             st.session_state["sys_msg"] = "✅ 排班演算法執行完成！"
             st.rerun()
     
@@ -1034,11 +1058,10 @@ elif step == "7. 排班與總管微調":
         y = st.session_state.config.get("year", datetime.today().year)
         m = st.session_state.config.get("month", datetime.today().month % 12 + 1)
         
-        # --- 為了避免 NameError，此處重新取得 Dates ---
         dates = generate_month_dates(y, m)
         std_min, std_max = calculate_shift_limits(y, m)
         
-        # === 側邊欄：即時診數與週六指標 (移至此處更好檢視) ===
+        # === 側邊欄：即時診數與週六指標 ===
         with st.sidebar:
             st.markdown("---")
             st.subheader("📊 總管監控儀表板")
@@ -1154,7 +1177,7 @@ elif step == "7. 排班與總管微調":
                                 """
                                 response = model.generate_content(sys_prompt + "\n\n使用者指示：" + ai_cmd)
                                 
-                                # 安全處理 Markdown 標記，避免引號與反引號造成 SyntaxError 或截斷
+                                # 安全處理 Markdown 標記
                                 mkd_json = "`" * 3 + "json"
                                 mkd_plain = "`" * 3
                                 cleaned_text = response.text.strip()
@@ -1168,7 +1191,6 @@ elif step == "7. 排班與總管微調":
                                 
                                 actions = json.loads(cleaned_text.strip())
                                 
-                                # 套用修改
                                 edited_res = st.session_state.result.copy()
                                 manual = st.session_state.config.get("manual_schedule", [])
                                 leaves = st.session_state.config.get("leaves", {})
@@ -1230,6 +1252,7 @@ elif step == "7. 排班與總管微調":
                                 st.session_state.result = edited_res
                                 st.session_state.config["manual_schedule"] = manual
                                 st.session_state.config["leaves"] = leaves
+                                st.session_state.config["saved_result"] = edited_res
                                 save_config(st.session_state.config)
                                 
                                 st.session_state["sys_msg"] = f"✅ AI 已經根據指示，為您在後台及畫面上套用了 {changes_applied} 項變更！"
@@ -1251,7 +1274,6 @@ elif step == "7. 排班與總管微調":
         with st.form("schedule_adjust_form"):
             st.subheader("📝 班表微調區 (AgGrid 雙層表頭版)")
             
-            # 使用列表保存所有的 grid_data 以便一次性儲存
             all_grids_data = []
             
             for w_idx, w_dates in enumerate(padded_weeks):
@@ -1280,6 +1302,7 @@ elif step == "7. 排班與總管微調":
                     rows.append(row)
                     
                 df = pd.DataFrame(rows)
+                # 欄寬增加為 130，以完整顯示人員姓名
                 col_defs = [{"headerName": "人員", "field": "person", "pinned": "left", "width": 130, "editable": False, "cellStyle": {"fontWeight": "bold", "borderRight": "2px solid #333", "backgroundColor": "#fff"}}]
                 
                 for d_info in w_dates:
@@ -1303,7 +1326,6 @@ elif step == "7. 排班與總管微調":
                 all_grids_data.append((w_dates, res['data']))
 
             if st.form_submit_button("💾 儲存並更新數據", type="primary"):
-                # 一次處理所有網格的資料
                 for w_dates, grid_data in all_grids_data:
                     if grid_data is not None and len(grid_data) > 0:
                         if isinstance(grid_data, pd.DataFrame): records = grid_data.to_dict('records')
@@ -1328,6 +1350,8 @@ elif step == "7. 排班與總管微調":
                                         edited_res[k][p_key][p_idx] = v_name
 
                 st.session_state.result = edited_res
+                st.session_state.config["saved_result"] = edited_res
+                save_config(st.session_state.config)
                 st.session_state["sys_msg"] = "✅ 總管班表微調已儲存，演算法及防呆指標更新完畢！"
                 st.rerun()
 
