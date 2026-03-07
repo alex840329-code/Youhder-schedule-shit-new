@@ -20,7 +20,7 @@ except ImportError:
     HAS_AGGRID = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v21.12 (本地解析與雙段排班版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v21.13 (動態流動與精準解析版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 if not HAS_AGGRID:
@@ -158,7 +158,7 @@ def parse_slot_string(text, is_fixed=False):
         if wd is not None and sh is not None: res_set.add((wd, sh))
     return res_set
 
-# --- 3. 核心排班演算法 (雙階段填洞版) ---
+# --- 3. 核心排班演算法 (雙階段填洞版 + 動態流動2) ---
 def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_count, flt_count, forced_assigns):
     assts = get_active_assistants(); docs = get_active_doctors()
     year = st.session_state.config.get("year", datetime.today().year)
@@ -231,6 +231,11 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         duty_docs = [x["Doctor"] for x in manual_schedule if x["Date"]==dt_str and x["Shift"]==sh]
         slot_res = result[slot]
         
+        # --- 動態判斷是否需要流動 2 ---
+        current_flt_count = flt_count
+        if len(duty_docs) >= 4:
+            current_flt_count = max(flt_count, 2)
+        
         def assigned_in_slot(name):
             is_admin = (wd, sh) in parsed_admin.get(name, set())
             return name in slot_res["counter"] or name in slot_res["floater"] or name in slot_res["look"] or name in slot_res["doctors"].values() or is_admin
@@ -284,7 +289,8 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 if r_type == "counter":
                     if asst_info.get("is_main_counter"): score += 50000 
                     if asst_info.get("type") == "兼職": score += 20000
-                    if asst_info.get("name") == "小瑜" and sh == "晚" and wd == 5: score += 100000
+                    # 小瑜專屬通道：只要是晚班櫃檯，必定優先抓她
+                    if rule.get("shift_limit") == "僅晚班" and sh == "晚": score += 200000
                 
                 if r_type == "floater":
                     if asst_info.get("is_main_counter"): score -= 100000 
@@ -315,7 +321,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             slot_res["counter"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); needed_ctr -= 1
             
         # 嚴格階段：流動
-        needed_flt = flt_count - len(slot_res["floater"])
+        needed_flt = current_flt_count - len(slot_res["floater"])
         for c in calculate_priority(cand_pool, "floater", strict=True):
             if needed_flt <= 0: break
             slot_res["floater"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); p_floater_counts[c] += 1; needed_flt -= 1
@@ -324,9 +330,14 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
     for slot in slots:
         dt_str, sh = slot.split("_"); curr_dt = datetime.strptime(dt_str, "%Y-%m-%d").date(); wd = curr_dt.weekday()
         slot_res = result[slot]
+        duty_docs = [x["Doctor"] for x in manual_schedule if x["Date"]==dt_str and x["Shift"]==sh]
         
+        current_flt_count = flt_count
+        if len(duty_docs) >= 4:
+            current_flt_count = max(flt_count, 2)
+            
         needed_ctr = ctr_count - len(slot_res["counter"])
-        needed_flt = flt_count - len(slot_res["floater"])
+        needed_flt = current_flt_count - len(slot_res["floater"])
         
         if needed_ctr <= 0 and needed_flt <= 0: continue
         
@@ -377,7 +388,8 @@ def parse_command_local(cmd, year, month, docs, assts):
     
     for line in lines:
         line = line.strip()
-        if not line: continue
+        if not line: 
+            continue
         
         # Rule 1: 醫師給助理跟診 (例: 峻豪醫師禮拜四整天給昀霏跟)
         m1 = re.search(r'([^\s]+?)(?:醫師)?\s*(?:禮拜|星期)([一二三四五六日天])\s*(整天|早上|下午|晚上|早|午|晚|早午)?\s*(?:給|讓|由|指定)?\s*([^\s]+?)\s*(?:跟|上)', line)
@@ -469,7 +481,7 @@ def to_excel_master(schedule_result, year, month, docs, assts):
                     k = f"{dt}_{s}"; anm = schedule_result.get(k, {}).get("doctors", {}).get(doc["name"], "")
                     sheet.write(row, col, next((a["nick"] for a in assts if a["name"]==anm), ""), f); col += 1
             row += 1
-        for rnm, rk, ri in [("櫃台1","counter",0), ("櫃台2","counter",1), ("流動","floater",0), ("看/行","look",0)]:
+        for rnm, rk, ri in [("櫃台1","counter",0), ("櫃台2","counter",1), ("流動","floater",0), ("流動2","floater",1), ("看/行","look",0)]:
             sheet.write(row, 0, rnm, fmts['h_col']); col = 1
             for dt in w_dates:
                 f = fmts['c_wknd'] if dt.weekday() == 5 else fmts['c_norm']
@@ -554,7 +566,7 @@ with st.sidebar:
     t_logic, t_month = st.tabs(["⚙️ 邏輯", "📅 班表"])
     with t_logic:
         logic_keys = ["api_key", "doctors_struct", "assistants_struct", "pairing_matrix", "adv_rules", "template_odd", "template_even", "forced_assigns"]
-        st.download_button("📥 下載基本邏輯 (含API Key)", json.dumps({k:st.session_state.config.get(k) for k in logic_keys}, ensure_ascii=False, indent=4), f"yude_logic_{datetime.now().strftime('%Y%m%d')}.json", "application/json", use_container_width=True)
+        st.download_button("📥 下載基本邏輯", json.dumps({k:st.session_state.config.get(k) for k in logic_keys}, ensure_ascii=False, indent=4), f"yude_logic_{datetime.now().strftime('%Y%m%d')}.json", "application/json", use_container_width=True)
         ul = st.file_uploader("📤 還原邏輯", type="json", key="ulogic")
         if ul and st.button("確認還原邏輯", use_container_width=True):
             try:
@@ -578,15 +590,6 @@ with st.sidebar:
                 if st.session_state.config.get("saved_result"): st.session_state.result = st.session_state.config["saved_result"]
                 save_config(st.session_state.config); st.rerun()
             except: st.error("還原失敗")
-    
-    st.divider()
-    st.subheader("🔍 分段分析導出")
-    export_choice = st.selectbox("選擇導出內容", ["規則與白名單 (rules)", "醫師配對 (matrix)", "醫師手動班表 (manual)", "助理假單 (leaves)", "目前排班結果 (result)"])
-    if st.button("生成文字"):
-        ex_map = {"規則與白名單 (rules)": "adv_rules", "醫師配對 (matrix)": "pairing_matrix", "醫師手動班表 (manual)": "manual_schedule", "助理假單 (leaves)": "leaves", "目前排班結果 (result)": "saved_result"}
-        target_k = ex_map.get(export_choice)
-        data_to_export = st.session_state.config.get(target_k) if target_k != "saved_result" else st.session_state.get("result")
-        st.text_area("複製以下內容：", json.dumps({target_k: data_to_export}, ensure_ascii=False), height=150)
 
 step = st.sidebar.radio("導覽", ["1. 人員設定", "2. 跟診配對", "3. 進階限制", "4. 班表生成", "5. 醫師入口", "6. 助理入口", "7. 排班微調", "8. 報表下載"])
 
@@ -794,6 +797,8 @@ elif step == "7. 排班微調":
     c1, c2 = st.columns(2); ctr = c1.slider("櫃台人數", 1,3,2); flt = c2.slider("流動人數",0,3,1)
     if st.button("🚀 執行自動排班演算法", type="primary"):
         with st.spinner("雙階段演算法運算中..."):
+            if 'result' in st.session_state: del st.session_state['result']
+            if 'saved_result' in st.session_state.config: del st.session_state.config['saved_result']
             res = run_auto_schedule(st.session_state.config["manual_schedule"], st.session_state.config["leaves"], st.session_state.config.get("pairing_matrix",{}), st.session_state.config.get("adv_rules",{}), ctr, flt, st.session_state.config.get("forced_assigns", {}))
             st.session_state.result = res; st.session_state.config["saved_result"] = res; save_config(st.session_state.config); st.rerun()
             
@@ -824,7 +829,7 @@ elif step == "7. 排班微調":
                                 if act.get("date"):
                                     targets.append(act["date"])
                                 elif act.get("weekday"):
-                                    wd_target = act["weekday"] - 1 # 1-7 map to 0-6
+                                    wd_target = act["weekday"] - 1 
                                     count = 0
                                     for d in range(1, calendar.monthrange(year, month)[1] + 1):
                                         dt_obj = date(year, month, d)
@@ -910,7 +915,7 @@ elif step == "7. 排班微調":
                                     if act.get("date"):
                                         targets.append(act["date"])
                                     elif act.get("weekday"):
-                                        wd_target = act["weekday"] - 1 # 0-5
+                                        wd_target = act["weekday"] - 1
                                         count = 0
                                         for d in range(1, calendar.monthrange(year, month)[1] + 1):
                                             dt_obj = date(year, month, d)
@@ -996,7 +1001,7 @@ elif step == "7. 排班微調":
                         for s in ["早","午","晚"]:
                             f = f"{dt['str']}_{s}"; r[f] = nm2n.get(st.session_state.result.get(f, {}).get("doctors", {}).get(d["name"], ""), "") if dt["is_curr"] else "-"
                     rows.append(r)
-                for rnm, rk, ri in [("櫃1","counter",0), ("櫃2","counter",1), ("流","floater",0), ("看/行","look",0)]:
+                for rnm, rk, ri in [("櫃1","counter",0), ("櫃2","counter",1), ("流","floater",0), ("流2","floater",1), ("看/行","look",0)]:
                     r = {"person": rnm, "type":"role", "key":rk, "idx":ri}
                     for dt in w_dates:
                         for s in ["早","午","晚"]:
@@ -1007,7 +1012,7 @@ elif step == "7. 排班微調":
                             else: r[f] = "-"
                     rows.append(r)
                 
-                cd = [{"headerName": "人員", "field": "person", "pinned": "left", "width": 70, "editable": False, "cellStyle": {"fontWeight":"bold","borderRight":"2px solid #333","backgroundColor":"#fff"}}]
+                cd = [{"headerName": "人員", "field": "person", "pinned": "left", "width": 80, "editable": False, "cellStyle": {"fontWeight":"bold","borderRight":"2px solid #333","backgroundColor":"#fff"}}]
                 for dt in w_dates:
                     child = [{"headerName": s, "field": f"{dt['str']}_{s}", "editable": dt["is_curr"], "cellEditor": "agSelectCellEditor", "cellEditorParams": {"values": a_opts}, "cellClass": "is_odd" if dt["date"].weekday()%2==0 else "is_even", "cellStyle": cell_style_js, "width": 55} for s in ["早","午","晚"]]
                     cd.append({"headerName": dt["disp"], "children": child, "headerClass": "header-odd" if dt["date"].weekday()%2==0 else "header-even"})
