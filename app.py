@@ -25,7 +25,7 @@ except ImportError:
     HAS_AI_LIB = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v20.2 (流動分配優化版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v20.2 (穩定優化版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 # --- 阻擋未安裝套件的狀態 ---
@@ -222,7 +222,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
     if "又嘉" in p_targets: p_targets["又嘉"] = max(0, std_max - 3)
 
     p_counts = {a["name"]: 0 for a in assts}
-    p_floater_counts = {a["name"]: 0 for a in assts} # 新增：追蹤流動診次
+    p_floater_counts = {a["name"]: 0 for a in assts} # 追蹤流動診次
     p_daily = {a["name"]: collections.defaultdict(set) for a in assts}
     slots = sorted(list(set([f"{x['Date']}_{x['Shift']}" for x in manual_schedule])), 
                    key=lambda x: (x.split("_")[0], {"早":1,"午":2,"晚":3}.get(x.split("_")[1], 9)))
@@ -332,7 +332,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             if needed_ctr <= 0: break
             slot_res["counter"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); needed_ctr -= 1
             
-        # 流動 (關鍵點：會套用上面寫的平均分配得分)
+        # 流動
         needed_flt = flt_count - len(slot_res["floater"])
         for c in calculate_priority(cand_pool, "floater"):
             if needed_flt <= 0: break
@@ -403,8 +403,8 @@ def to_excel_individual(schedule_result, year, month, assts, docs):
             for ci, sh in enumerate(["早","午","晚"]):
                 v = ""; data = schedule_result.get(f"{dt}_{sh}", {})
                 if anm in data.get("look", []): v="看"
-                elif anm in data.get("floater", []): v="流"
-                elif anm in data.get("counter", []): v="櫃"
+                elif anm in data["floater"]: v="流"
+                elif anm in data["counter"]: v="櫃"
                 else:
                     for dn, asn in data.get("doctors", {}).items():
                         if asn == anm: v = next((d["nick"] for d in docs if d["name"]==dn), dn)
@@ -497,12 +497,24 @@ elif step == "3. 進階限制":
     assts = get_active_assistants(); curr_rules = st.session_state.config.get("adv_rules", {})
     st.info("💡 **自動連動：** A 避開 B，儲存後 B 也會自動避開 A。行政診時段排班會自動跳過。")
     new_rules = {}
+    
+    role_options = ["無限制", "僅櫃台", "僅行政", "僅流動", "僅跟診"]
+    shift_options = ["無限制", "僅早班", "僅午班", "僅晚班"]
+    
     for a in assts:
         nm = a["name"]; r = curr_rules.get(nm, {})
         c1, c2, c3, c4, c5, c6 = st.columns([1, 1.5, 1.5, 2.5, 1.5, 1.5])
         c1.markdown(f"**{nm}**")
-        rv = c2.selectbox("職位", ["無限制","僅櫃台","僅行政","僅流動","僅跟診"], index=["無限制","僅櫃台","僅行政","僅流動","僅跟診"].index(r.get("role_limit","無限制")), key=f"r_{nm}", label_visibility="collapsed")
-        sv = c3.selectbox("班別", ["無限制","僅早班","僅午班","僅晚班"], index=["無限制","僅早班","僅午班","僅晚班"].index(r.get("shift_limit","無限制")), key=f"s_{nm}", label_visibility="collapsed")
+        
+        # 安全取得 Index，防止報錯
+        cur_role = r.get("role_limit", "無限制")
+        role_idx = role_options.index(cur_role) if cur_role in role_options else 0
+        rv = c2.selectbox("職位", role_options, index=role_idx, key=f"r_{nm}", label_visibility="collapsed")
+        
+        cur_shift = r.get("shift_limit", "無限制")
+        shift_idx = shift_options.index(cur_shift) if cur_shift in shift_options else 0
+        sv = c3.selectbox("班別", shift_options, index=shift_idx, key=f"s_{nm}", label_visibility="collapsed")
+        
         others = [x["name"] for x in assts if x["name"] != nm]
         av = c4.multiselect("避開", others, default=[x.strip() for x in r.get("avoid","").split(",") if x.strip() in others], key=f"v_{nm}", label_visibility="collapsed")
         with c5.popover("📅 白名單"):
@@ -653,7 +665,6 @@ elif step == "7. 排班微調":
                     if not daily_p[nm][d]: sat_stats[nm]["full_off"] += 1
                     if "晚" in daily_p[nm][d]: sat_stats[nm]["nights"] += 1
                 
-                # 顯示監控項
                 c_val = curr_counts[nm]; f_val = curr_floaters[nm]
                 status_color = "green" if std_min <= c_val <= std_max else "red"
                 st.markdown(f"**{nm}** ({a['type']})")
@@ -668,7 +679,7 @@ elif step == "7. 排班微調":
             st.session_state.result = res; st.session_state.config["saved_result"] = res; save_config(st.session_state.config); st.rerun()
             
     if 'result' in st.session_state:
-        # AI 助手 (更新為穩定 API)
+        # AI 助手
         with st.expander("🤖 Gemini AI 指令助手", expanded=False):
             api_key = st.text_input("Gemini API Key", value=st.session_state.config.get("api_key",""), type="password")
             cmd = st.text_area("口語化指令", placeholder="Ex: 峻豪醫師禮拜四都給昀霏跟診 / 小瑜3/21晚上休假")
@@ -677,6 +688,7 @@ elif step == "7. 排班微調":
                     st.session_state.config["api_key"] = api_key; save_config(st.session_state.config)
                     with st.spinner("AI 解析中..."):
                         try:
+                            # 採用穩定模型版本
                             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={api_key}"
                             docs_str = ",".join([d["name"] for d in get_active_doctors()])
                             asst_str = ",".join([a["name"] for a in get_active_assistants()])
