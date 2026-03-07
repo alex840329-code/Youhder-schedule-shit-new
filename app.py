@@ -24,7 +24,7 @@ except ImportError:
     HAS_AI_LIB = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v19.3 (窄欄與側邊監控版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v19.4 (備份防呆與寬欄版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 # --- 阻擋未安裝套件的狀態 ---
@@ -614,7 +614,7 @@ def to_excel_doctor_confirmed(manual_schedule, year, month, doc_name):
     return output
 
 # --- 7. UI 介面 ---
-st.title("🦷 祐德牙醫 - 智慧排班系統 v19.3 (窄欄與側邊監控版)")
+st.title("🦷 祐德牙醫 - 智慧排班系統 v19.4 (備份防呆與寬欄版)")
 
 is_locked_system = st.session_state.config.get("is_locked", False)
 
@@ -624,6 +624,32 @@ with st.sidebar:
     new_lock_state = st.toggle("🔒 鎖定前台修改 (Deadline)", value=is_locked_system, help="開啟後，醫師與助理將無法更改假單。")
     if new_lock_state != is_locked_system:
         st.session_state.config["is_locked"] = new_lock_state; save_config(st.session_state.config); st.rerun()
+
+    st.divider()
+    st.subheader("💾 系統資料備份與還原")
+    st.info("💡 雲端伺服器(GitHub)重啟會導致資料遺失。請養成定期下載備份的習慣！")
+    
+    # 下載備份 (JSON)
+    json_string = json.dumps(st.session_state.config, ensure_ascii=False, indent=4)
+    st.download_button(
+        label="📥 下載系統所有資料 (備份)",
+        file_name=f"yude_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+        mime="application/json",
+        data=json_string,
+    )
+    
+    # 上傳還原 (JSON)
+    uploaded_file = st.file_uploader("📤 上傳備份檔 (還原)", type="json")
+    if uploaded_file is not None:
+        if st.button("⚠️ 確認還原 (將覆蓋現有資料)", type="primary"):
+            try:
+                new_config = json.load(uploaded_file)
+                st.session_state.config = new_config
+                save_config(new_config)
+                st.session_state["sys_msg"] = "✅ 資料還原成功！"
+                st.rerun()
+            except Exception as e:
+                st.error(f"還原失敗，檔案格式不正確：{e}")
 
 step = st.sidebar.radio("導覽步驟", [
     "1. 系統與人員設定", "2. 醫師配對順位", "3. 助理進階限制", "4. 醫師範本與生成", 
@@ -793,7 +819,7 @@ elif step == "4. 醫師範本與生成":
             rows.append(row)
         df = pd.DataFrame(rows)
         
-        col_defs = [{"headerName": "醫師", "field": "doctor", "pinned": "left", "width": 90, "cellStyle": {"fontWeight": "bold", "borderRight": "2px solid #333", "backgroundColor": "#fff"}}]
+        col_defs = [{"headerName": "醫師", "field": "doctor", "pinned": "left", "width": 140, "cellStyle": {"fontWeight": "bold", "borderRight": "2px solid #333", "backgroundColor": "#fff"}}]
         
         for i, d in enumerate(days):
             is_odd = (i % 2 == 0)
@@ -1254,7 +1280,7 @@ elif step == "7. 排班與總管微調":
                     rows.append(row)
                     
                 df = pd.DataFrame(rows)
-                col_defs = [{"headerName": "人員", "field": "person", "pinned": "left", "width": 90, "editable": False, "cellStyle": {"fontWeight": "bold", "borderRight": "2px solid #333", "backgroundColor": "#fff"}}]
+                col_defs = [{"headerName": "人員", "field": "person", "pinned": "left", "width": 130, "editable": False, "cellStyle": {"fontWeight": "bold", "borderRight": "2px solid #333", "backgroundColor": "#fff"}}]
                 
                 for d_info in w_dates:
                     is_odd = (d_info["date"].weekday() % 2 == 0)
