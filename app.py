@@ -25,7 +25,7 @@ except ImportError:
     HAS_AI_LIB = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v20.3 (兼職櫃檯優先版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v20.4 (全面強健穩定版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 # --- 阻擋未安裝套件的狀態 ---
@@ -150,11 +150,17 @@ if 'config' not in st.session_state:
 
 # --- 2. 日期與輔助函式 ---
 def get_active_doctors():
-    docs = sorted(st.session_state.config.get("doctors_struct", []), key=lambda x: x.get("order", 99))
+    raw_docs = st.session_state.config.get("doctors_struct")
+    if raw_docs is None: raw_docs = []
+    # 增加強健性：過濾非 dict 項目並處理 None
+    docs = sorted([d for d in raw_docs if isinstance(d, dict)], key=lambda x: x.get("order", 99))
     return [d for d in docs if d.get("active", True)]
 
 def get_active_assistants():
-    return [a for a in st.session_state.config.get("assistants_struct", []) if a.get("active", True)]
+    raw_assts = st.session_state.config.get("assistants_struct")
+    if raw_assts is None: raw_assts = []
+    # 增加強健性：過濾非 dict 項目
+    return [a for a in raw_assts if isinstance(a, dict) and a.get("active", True)]
 
 def generate_month_dates(year, month):
     num_days = calendar.monthrange(year, month)[1]
@@ -192,17 +198,17 @@ def parse_slot_string(text, is_fixed=False):
         res = {}
         for item in items:
             if len(item) < 3: continue
-            wd = wd_map.get(item[0]); sh = shift_map.get(item[1]); rl = role_map.get(item[2])
+            wd = wd_map.get(item[0]); sh = sh_map.get(item[1]); rl = role_map.get(item[2])
             if wd is not None and sh is not None and rl is not None: res[(wd, sh)] = rl
         return res
     res_set = set()
     for item in items:
         if len(item) < 2: continue
-        wd = wd_map.get(item[0]); sh = shift_map.get(item[1])
+        wd = wd_map.get(item[0]); sh = sh_map.get(item[1])
         if wd is not None and sh is not None: res_set.add((wd, sh))
     return res_set
 
-# --- 3. 核心排班演算法 (強化兼職人員櫃檯優先級) ---
+# --- 3. 核心排班演算法 (強化流動平均分配與兼職優先) ---
 def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_count, flt_count):
     assts = get_active_assistants(); docs = get_active_doctors()
     year = st.session_state.config.get("year", datetime.today().year)
@@ -291,25 +297,23 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 asst_info = next((a for a in assts if a["name"] == c), {})
                 rule = adv_rules.get(c, {})
                 
-                # 基礎得分：離目標診數的差距
                 score = (p_targets[c] - p_counts[c]) * 10
                 
-                # --- 特殊邏輯：櫃檯兼職優先 (核心修改點) ---
+                # --- 特殊邏輯：櫃檯兼職優先 ---
                 if r_type == "counter":
                     if asst_info.get("type") == "兼職":
-                        score += 2000 # 給予兼職極高優先權，確保他們能被排入櫃檯
+                        score += 2000 
                     elif asst_info.get("is_main_counter"):
-                        score += 500  # 主櫃檯次之
+                        score += 500  
                 
                 # --- 特殊邏輯：流動診平均分配 ---
                 if r_type == "floater":
                     if asst_info.get("is_main_counter"):
-                        score -= 500 # 專職櫃檯除非沒人，否則不排流動
+                        score -= 500 # 專職櫃檯不排流動
                     else:
-                        # 核心：流動次數越少，得分越高（為了平均）
                         score += (20 - p_floater_counts[c]) * 5 
                 
-                # 兼職與白名單優先級 (時段越少權重越高)
+                # 兼職與白名單優先級
                 s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
                 if s_wl: score += (100 / max(1, len(s_wl)))
                 
@@ -452,9 +456,12 @@ with st.sidebar:
         if up_logic and st.button("確認還原邏輯", use_container_width=True):
             try:
                 new_logic = json.load(up_logic)
-                for k in logic_keys: st.session_state.config[k] = new_logic.get(k)
+                df_cfg = get_default_config()
+                for k in logic_keys: 
+                    val = new_logic.get(k)
+                    st.session_state.config[k] = val if val is not None else df_cfg.get(k)
                 save_config(st.session_state.config); st.session_state["sys_msg"]="✅ 邏輯還原成功！"; st.rerun()
-            except: st.error("錯誤")
+            except: st.error("還原失敗")
             
     with t_month:
         month_keys = ["year", "month", "manual_schedule", "leaves", "saved_result"]
@@ -465,12 +472,20 @@ with st.sidebar:
         if up_month and st.button("確認還原班表", use_container_width=True):
             try:
                 new_month = json.load(up_month)
-                for k in month_keys: st.session_state.config[k] = new_month.get(k)
-                if new_month.get("saved_result"): st.session_state.result = new_month["saved_result"]
+                df_cfg = get_default_config()
+                for k in month_keys: 
+                    val = new_month.get(k)
+                    st.session_state.config[k] = val if val is not None else df_cfg.get(k)
+                if st.session_state.config.get("saved_result"): 
+                    st.session_state.result = st.session_state.config["saved_result"]
                 save_config(st.session_state.config); st.session_state["sys_msg"]="✅ 班表還原成功！"; st.rerun()
-            except: st.error("錯誤")
+            except: st.error("還原失敗")
 
 step = st.sidebar.radio("導覽", ["1. 人員設定", "2. 跟診配對", "3. 進階限制", "4. 班表生成", "5. 醫師入口", "6. 助理入口", "7. 排班微調", "8. 報表下載"])
+
+def safe_index(options, value, default=0):
+    try: return options.index(value)
+    except (ValueError, TypeError): return default
 
 if step == "1. 人員設定":
     st.header("人員設定")
@@ -513,14 +528,8 @@ elif step == "3. 進階限制":
         c1, c2, c3, c4, c5, c6 = st.columns([1, 1.5, 1.5, 2.5, 1.5, 1.5])
         c1.markdown(f"**{nm}**")
         
-        # 安全取得 Index，防止報錯
-        cur_role = r.get("role_limit", "無限制")
-        role_idx = role_options.index(cur_role) if cur_role in role_options else 0
-        rv = c2.selectbox("職位", role_options, index=role_idx, key=f"r_{nm}", label_visibility="collapsed")
-        
-        cur_shift = r.get("shift_limit", "無限制")
-        shift_idx = shift_options.index(cur_shift) if cur_shift in shift_options else 0
-        sv = c3.selectbox("班別", shift_options, index=shift_idx, key=f"s_{nm}", label_visibility="collapsed")
+        rv = c2.selectbox("職位", role_options, index=safe_index(role_options, r.get("role_limit", "無限制")), key=f"r_{nm}", label_visibility="collapsed")
+        sv = c3.selectbox("班別", shift_options, index=safe_index(shift_options, r.get("shift_limit", "無限制")), key=f"s_{nm}", label_visibility="collapsed")
         
         others = [x["name"] for x in assts if x["name"] != nm]
         av = c4.multiselect("避開", others, default=[x.strip() for x in r.get("avoid","").split(",") if x.strip() in others], key=f"v_{nm}", label_visibility="collapsed")
@@ -549,7 +558,7 @@ elif step == "3. 進階限制":
         st.session_state.config["adv_rules"] = new_rules; save_config(st.session_state.config); st.rerun()
 
 elif step == "4. 班表生成":
-    st.header("醫師範本與初始化")
+    st.header("醫師班表範本與初始化")
     c1, c2, c3 = st.columns(3)
     y = c1.number_input("年", 2025, 2030, st.session_state.config.get("year"))
     m = c2.number_input("月", 1, 12, st.session_state.config.get("month"))
@@ -701,11 +710,14 @@ elif step == "7. 排班微調":
                             prompt = f"年月:{y}/{m}.醫師:{docs_str}.助理:{asst_str}.將指令轉為JSON格式動作清單(assign_assistant_to_doctor, doctor_leave, assistant_leave, assign_admin).指令:{cmd}"
                             payload = {"contents": [{"parts": [{"text": prompt}]}]}
                             resp = requests.post(url, json=payload); raw_txt = resp.json()['candidates'][0]['content']['parts'][0]['text']
+                            
+                            # 安全處理字串避免被截斷或當機
                             mk_j = "`" * 3 + "json"; mk_p = "`" * 3
                             clean = raw_txt.strip()
                             if clean.startswith(mk_j): clean = clean[len(mk_j):]
                             elif clean.startswith(mk_p): clean = clean[len(mk_p):]
                             if clean.endswith(mk_p): clean = clean[:-len(mk_p)]
+                            
                             acts = json.loads(clean.strip())
                             st.session_state["sys_msg"] = f"✅ AI 建議套用 {len(acts)} 項變更 (請點擊執行排班套用)"; st.rerun()
                         except Exception as e: st.error(f"解析失敗: {e}")
