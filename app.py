@@ -20,7 +20,7 @@ except ImportError:
     HAS_AGGRID = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v21.14 (精準對齊與報表優化版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v21.15 (精準人力面板與 AI 討論版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 if not HAS_AGGRID:
@@ -371,10 +371,34 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
 # --- 4. 本地關鍵字解析與 API 雙引擎 ---
 def fuzzy_match_person(name_str, lst):
     clean = name_str.replace("醫師", "").strip()
-    # 【重大修正】雙向包含檢查，解決前面有多餘贅字導致比對失敗的問題
+    
+    # 【重大修正 1】優先執行：精確比對 (避免將芷瑜誤判為瑜)
     for item in lst:
-        if clean in item["name"] or item["name"] in clean: return item["name"]
-        if item.get("nick") and (clean in item["nick"] or item["nick"] in clean): return item["name"]
+        if clean == item["name"] or (item.get("nick") and clean == item["nick"]):
+            return item["name"]
+            
+    # 【重大修正 2】執行字串包含檢查，但只回傳「最長配對」的名稱
+    best_match = None
+    max_overlap = 0
+    for item in lst:
+        nm = item["name"]
+        nk = item.get("nick", "")
+        
+        if nm in clean and len(nm) > max_overlap:
+            best_match = nm; max_overlap = len(nm)
+        elif clean in nm and len(clean) > max_overlap:
+            best_match = nm; max_overlap = len(clean)
+            
+        if nk:
+            if nk in clean and len(nk) > max_overlap:
+                best_match = nm; max_overlap = len(nk)
+            elif clean in nk and len(clean) > max_overlap:
+                best_match = nm; max_overlap = len(clean)
+                
+    if best_match: 
+        return best_match
+
+    # 如果都沒配到，加上醫師後綴看看
     return clean + "醫師" if any("醫師" in d["name"] for d in lst) else clean
 
 def parse_command_local(cmd, year, month, docs, assts):
@@ -1053,14 +1077,18 @@ elif step == "7. 排班微調":
         
         with st.form("adj_form"):
             for wi, w_dates in enumerate(p_weeks):
-                daily_off_staff = {}
+                # 改為以「早/午/晚」為單位的空閒人力陣列
+                shift_off_staff = {}
                 for dt in w_dates:
                     if not dt["is_curr"]: continue
-                    d_str = dt["str"]; working = set()
+                    d_str = dt["str"]
                     for sh in ["早","午","晚"]:
                         data = st.session_state.result.get(f"{d_str}_{sh}", {})
-                        working.update(list(data.get("doctors", {}).values()) + data.get("counter", []) + data.get("floater", []) + data.get("look", []))
-                    daily_off_staff[d_str] = [a["name"] for a in get_active_assistants() if a["name"] not in working and not any(leaves_data.get(f"{a['name']}_{d_str}_{sh}") for sh in ["早","午","晚"])]
+                        working = set(list(data.get("doctors", {}).values()) + data.get("counter", []) + data.get("floater", []) + data.get("look", []))
+                        shift_off_staff[f"{d_str}_{sh}"] = [
+                            a["name"] for a in get_active_assistants() 
+                            if a["name"] not in working and not leaves_data.get(f"{a['name']}_{d_str}_{sh}")
+                        ]
 
                 rows = []
                 for d in docs:
@@ -1086,15 +1114,33 @@ elif step == "7. 排班微調":
                     cd.append({"headerName": dt["disp"], "children": child, "headerClass": "header-odd" if dt["date"].weekday()%2==0 else "header-even"})
                 AgGrid(pd.DataFrame(rows), gridOptions={"columnDefs": cd, "rowHeight": 40, "domLayout": 'autoHeight'}, allow_unsafe_jscode=True, theme="alpine", key=f"ag_final_{wi}")
                 
+                # 獨立繪製每一天的早、午、晚空閒名單
                 off_cols = st.columns(len(w_dates))
                 for idx, dt in enumerate(w_dates):
                     if dt["is_curr"]:
-                        off_nicks = [nm2n.get(n, n) for n in daily_off_staff.get(dt["str"], []) if n]
-                        off_cols[idx].markdown(f"""<div class="off-staff-box"><b>有空：</b><br>{",".join(off_nicks) if off_nicks else "無"}</div>""", unsafe_allow_html=True)
+                        d_str = dt["str"]
+                        html_parts = []
+                        for sh in ["早","午","晚"]:
+                            off_nicks = [nm2n.get(n, n) for n in shift_off_staff.get(f"{d_str}_{sh}", []) if n]
+                            html_parts.append(f"<div style='margin-bottom:2px;'><b>{sh}:</b> {','.join(off_nicks) if off_nicks else '<span style=\"color:#ccc\">無</span>'}</div>")
+                        
+                        off_cols[idx].markdown(f"""<div class="off-staff-box" style="padding:5px;">{''.join(html_parts)}</div>""", unsafe_allow_html=True)
                 st.markdown("<br>", unsafe_allow_html=True)
 
             if st.form_submit_button("💾 同步更新與儲存"):
                 st.session_state.config["saved_result"] = st.session_state.result; save_config(st.session_state.config); st.rerun()
+                
+        # 專屬 AI 匯出 JSON 功能區塊
+        st.divider()
+        with st.expander("💬 匯出當前班表 (與 AI 討論專用)"):
+            st.info("點擊下方內容並複製，您可以直接貼給 ChatGPT 或 Claude 等 AI，請它幫忙找出班表盲點或檢查人力是否分配不均。")
+            export_payload = {
+                "month": f"{y}-{m}",
+                "schedule": st.session_state.result,
+                "rules": st.session_state.config.get("adv_rules", {}),
+                "leaves": leaves_data
+            }
+            st.text_area("請複製以下 JSON 格式資料：", json.dumps(export_payload, ensure_ascii=False), height=200)
 
 elif step == "8. 報表下載":
     st.header("下載 Excel 報表")
