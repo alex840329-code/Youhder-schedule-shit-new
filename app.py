@@ -20,7 +20,7 @@ except ImportError:
     HAS_AGGRID = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v21.15 (精準人力面板與 AI 討論版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v21.16 (流動平衡與週六鐵律版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 if not HAS_AGGRID:
@@ -224,6 +224,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 result[slot]["floater"].append(a_name)
                 p_counts[a_name] += 1
                 p_daily[a_name][dt_str].add(sh)
+                p_floater_counts[a_name] += 1
 
     # 2. 自動排班 (嚴格階段)
     for slot in slots:
@@ -295,13 +296,14 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 
                 if r_type == "floater":
                     if asst_info.get("is_main_counter"): score -= 100000 
-                    else: score += (30 - p_floater_counts[c]) * 500 
+                    else: 
+                        # 【重大優化】：給予流動次數極高權重，強制拉平流動次數
+                        score += (50 - p_floater_counts[c]) * 100000
                 
                 if wd == 5 and asst_info.get("type") == "全職": 
                     score += 15000
                     
                     # === 加入排班鐵律的防呆懲罰 (給 Phase 3 填洞時參考) ===
-                    # 即便是為了填補空缺，也極度避免違反全職人員的週末休息權益
                     sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[c][d])
                     if sh == "晚" and sat_nites >= 1:
                         score -= 2000000  # 極度不想排第二個六晚
@@ -316,6 +318,21 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
 
         cand_pool = [a["name"] for a in assts]
         
+        # 【重大優化：調換排班順序】 櫃台 -> 流動 -> 醫師 (讓流動名額先由次數最少的人挑走)
+        
+        # 1. 先排櫃台
+        needed_ctr = ctr_count - len(slot_res["counter"])
+        for c in calculate_priority(cand_pool, "counter", strict=True):
+            if needed_ctr <= 0: break
+            slot_res["counter"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); needed_ctr -= 1
+            
+        # 2. 再排流動 (平衡次數)
+        needed_flt = current_flt_count - len(slot_res["floater"])
+        for c in calculate_priority(cand_pool, "floater", strict=True):
+            if needed_flt <= 0: break
+            slot_res["floater"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); p_floater_counts[c] += 1; needed_flt -= 1
+
+        # 3. 最後才挑跟診 (剩餘人力分配，可能會忽略順位名單，但保證了公平)
         for d_name in duty_docs:
             if d_name in slot_res["doctors"]: continue
             picked = None; targets = [pairing_matrix.get(d_name, {}).get(k) for k in ["1","2","3"]]
@@ -324,16 +341,6 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             if not picked:
                 for c in calculate_priority(cand_pool, "doctor", strict=True): picked = c; break
             if picked: slot_res["doctors"][d_name] = picked; p_counts[picked] += 1; p_daily[picked][dt_str].add(sh)
-            
-        needed_ctr = ctr_count - len(slot_res["counter"])
-        for c in calculate_priority(cand_pool, "counter", strict=True):
-            if needed_ctr <= 0: break
-            slot_res["counter"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); needed_ctr -= 1
-            
-        needed_flt = current_flt_count - len(slot_res["floater"])
-        for c in calculate_priority(cand_pool, "floater", strict=True):
-            if needed_flt <= 0: break
-            slot_res["floater"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); p_floater_counts[c] += 1; needed_flt -= 1
 
     # 3. 自動排班 (填洞救援階段)
     for slot in slots:
@@ -342,7 +349,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         duty_docs = [x["Doctor"] for x in manual_schedule if x["Date"]==dt_str and x["Shift"]==sh]
         
         current_flt_count = flt_count
-        if len(duty_docs) >= 5: # 改為 5 位醫師才觸發 2 位流動，節省人力
+        if len(duty_docs) >= 5: 
             current_flt_count = max(flt_count, 2)
             
         needed_ctr = ctr_count - len(slot_res["counter"])
@@ -354,6 +361,14 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             if name in slot_res["counter"] or name in slot_res["floater"] or name in slot_res["look"] or name in slot_res["doctors"].values(): return False
             if f"{name}_{dt_str}_{sh}" in leaves: return False
             
+            asst_info = next((a for a in assts if a["name"] == name), {})
+
+            # 【強制防線】：填洞時也絕對不允許犧牲最後一個完整休假的星期六
+            if wd == 5 and asst_info.get("type") == "全職":
+                off_sats = [sd for sd in sat_dates if len(p_daily[name][sd]) == 0]
+                if len(off_sats) == 1 and off_sats[0] == dt_str: 
+                    return False # 絕對阻擋，寧可留空！
+
             rule = adv_rules.get(name, {})
             s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
             if s_wl and (wd, sh) not in s_wl: return False
@@ -385,12 +400,10 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
 def fuzzy_match_person(name_str, lst):
     clean = name_str.replace("醫師", "").strip()
     
-    # 【重大修正 1】優先執行：精確比對 (避免將芷瑜誤判為瑜)
     for item in lst:
         if clean == item["name"] or (item.get("nick") and clean == item["nick"]):
             return item["name"]
             
-    # 【重大修正 2】執行字串包含檢查，但只回傳「最長配對」的名稱
     best_match = None
     max_overlap = 0
     for item in lst:
@@ -411,7 +424,6 @@ def fuzzy_match_person(name_str, lst):
     if best_match: 
         return best_match
 
-    # 如果都沒配到，加上醫師後綴看看
     return clean + "醫師" if any("醫師" in d["name"] for d in lst) else clean
 
 def parse_command_local(cmd, year, month, docs, assts):
@@ -423,7 +435,6 @@ def parse_command_local(cmd, year, month, docs, assts):
         if not line: 
             continue
         
-        # Rule 1: 醫師給助理跟診 (加強彈性支援)
         m1 = re.search(r'([^\s\d\(\)]+?)(?:醫師)?\s*(?:禮拜|星期|週|周)([一二三四五六日天1-7])\s*(整天|早上|下午|晚上|早午晚|早午|午晚|早晚|早|午|晚)?\s*(?:給|讓|由|指定)?\s*([^\s\d\(\)]+?)\s*(?:跟|上)', line)
         if m1:
             doc = fuzzy_match_person(m1.group(1), docs)
@@ -437,13 +448,11 @@ def parse_command_local(cmd, year, month, docs, assts):
             acts.append({"action": "assign_assistant_to_doctor", "doctor": doc, "assistant": asst, "weekday": wd, "shift": shift})
             continue
             
-        # Rule 2: 特定第幾個星期幾上班/休假 (加強彈性支援)
         m2 = re.search(r'([^\s\d\(\)]+?)(?:醫師)?\s*第\s*(\d+)\s*[個]*\s*(?:星期|禮拜|週|周)([一二三四五六日天1-7])\s*(整天|早上|下午|晚上|早午晚|早午|午晚|早晚|早|午|晚)?\s*(?:要|想)?(?:休假|請假|排班|上班|休息)', line)
         if m2:
             person = fuzzy_match_person(m2.group(1), assts + docs)
             w_num = int(m2.group(2)); wd = wd_map.get(m2.group(3))
             sh_str = m2.group(4) or "整天"
-            # 以整行內容檢查動作
             act_type = "leave" if any(x in line for x in ["休", "請", "息"]) else "force_assign"
             shifts = []
             if "早" in sh_str or "整" in sh_str: shifts.append("早")
@@ -455,7 +464,6 @@ def parse_command_local(cmd, year, month, docs, assts):
                 else: acts.append({"action": act_type, "assistant": person, "weekday": wd, "week_number": w_num, "shift": s})
             continue
 
-        # Rule 3: 終極升級版！完全容忍符號、括號與前後順序對調
         m3 = re.search(r'([^\s\d\(\)]+?)(?:醫師)?\s*(?:於)?\s*(\d+)[月/.-]\s*(\d+)[號日]?\s*(?:\(?\s*(?:星期|禮拜|週|周)?\s*([一二三四五六日天1-7])\s*\)?)?\s*(整天|早上|下午|晚上|早午晚|早午|午晚|早晚|早|午|晚)?\s*(?:要|想)?(休假|請假|排班|上班|休息)', line)
         m3_rev = re.search(r'(\d+)[月/.-]\s*(\d+)[號日]?\s*(?:\(?\s*(?:星期|禮拜|週|周)?\s*([一二三四五六日天1-7])\s*\)?)?\s*(?:由|讓|是)?\s*([^\s\d\(\)]+?)(?:醫師)?\s*(整天|早上|下午|晚上|早午晚|早午|午晚|早晚|早|午|晚)?\s*(?:要|想)?(休假|請假|排班|上班|休息)', line)
         
