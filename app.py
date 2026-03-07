@@ -24,7 +24,7 @@ except ImportError:
     HAS_AI_LIB = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v19.2 (完美連動版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v19.3 (窄欄與側邊監控版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 # --- 阻擋未安裝套件的狀態 ---
@@ -614,7 +614,7 @@ def to_excel_doctor_confirmed(manual_schedule, year, month, doc_name):
     return output
 
 # --- 7. UI 介面 ---
-st.title("🦷 祐德牙醫 - 智慧排班系統 v19.2 (完美連動版)")
+st.title("🦷 祐德牙醫 - 智慧排班系統 v19.3 (窄欄與側邊監控版)")
 
 is_locked_system = st.session_state.config.get("is_locked", False)
 
@@ -793,7 +793,7 @@ elif step == "4. 醫師範本與生成":
             rows.append(row)
         df = pd.DataFrame(rows)
         
-        col_defs = [{"headerName": "醫師", "field": "doctor", "pinned": "left", "width": 140, "cellStyle": {"fontWeight": "bold", "borderRight": "2px solid #333", "backgroundColor": "#fff"}}]
+        col_defs = [{"headerName": "醫師", "field": "doctor", "pinned": "left", "width": 90, "cellStyle": {"fontWeight": "bold", "borderRight": "2px solid #333", "backgroundColor": "#fff"}}]
         
         for i, d in enumerate(days):
             is_odd = (i % 2 == 0)
@@ -802,7 +802,7 @@ elif step == "4. 醫師範本與生成":
                 children.append({
                     "headerName": s, "field": f"星期{d}_{s}", "editable": True,
                     "cellEditor": "agCheckboxCellEditor", "cellRenderer": "agCheckboxCellRenderer",
-                    "cellClass": "is_odd" if is_odd else "is_even", "cellStyle": cell_style_js, "width": 70
+                    "cellClass": "is_odd" if is_odd else "is_even", "cellStyle": cell_style_js, "width": 50
                 })
             col_defs.append({
                 "headerName": f"星期{d}", "children": children, "headerClass": "header-odd" if is_odd else "header-even"
@@ -1005,11 +1005,79 @@ elif step == "7. 排班與總管微調":
             st.rerun()
     
     if 'result' in st.session_state:
-        st.divider()
         y = st.session_state.config.get("year", datetime.today().year)
         m = st.session_state.config.get("month", datetime.today().month % 12 + 1)
         
+        # --- 為了避免 NameError，此處重新取得 Dates ---
+        dates = generate_month_dates(y, m)
+        std_min, std_max = calculate_shift_limits(y, m)
+        
+        # === 側邊欄：即時診數與週六指標 (移至此處更好檢視) ===
+        with st.sidebar:
+            st.markdown("---")
+            st.subheader("📊 總管監控儀表板")
+            
+            assts = get_active_assistants()
+            curr_counts = {a["name"]: 0 for a in assts}
+            sat_dates = [str(dt) for dt in dates if dt.weekday() == 5]
+            sat_stats = {a["name"]: {"worked_days": 0, "nights": 0, "no_night_worked": 0, "full_off": 0} for a in assts}
+            daily_shifts = collections.defaultdict(lambda: collections.defaultdict(set))
+            
+            for k, v in st.session_state.result.items():
+                dt_str, sh = k.split("_")
+                ppl = list(v["doctors"].values()) + v["counter"] + v["floater"] + v.get("look", [])
+                for p in ppl: 
+                    if p:
+                        daily_shifts[p][dt_str].add(sh)
+                        curr_counts[p] += 1
+                        
+            for a in assts:
+                nm = a["name"]
+                for d in sat_dates:
+                    shifts = daily_shifts[nm][d]
+                    if shifts:
+                        sat_stats[nm]["worked_days"] += 1
+                        if "晚" in shifts: sat_stats[nm]["nights"] += 1
+                        else: sat_stats[nm]["no_night_worked"] += 1
+                    else:
+                        sat_stats[nm]["full_off"] += 1
+
+            heaven_earth_warnings = []
+            
+            c_stats1, c_stats2 = st.columns(2)
+            for idx, a in enumerate(assts):
+                nm = a["name"]; c_val = curr_counts[nm]
+                target_col = c_stats1 if idx % 2 == 0 else c_stats2
+                
+                for d_str, shifts in daily_shifts[nm].items():
+                    if "早" in shifts and "晚" in shifts and "午" not in shifts:
+                        heaven_earth_warnings.append(f"{a['nick']} 在 {d_str} 被排了天地班！")
+                
+                with target_col:
+                    if a["type"] == "全職":
+                        lim = std_max; target = std_min if a["pref"] == "low" else std_max
+                        msg = f"{a['nick']}: {c_val} (標:{target})"
+                        if c_val < std_min: st.warning(f"🟡 {msg}")
+                        elif c_val > lim: st.error(f"🔴 {msg} 爆")
+                        else: st.success(f"🟢 {msg}")
+                        
+                        s_off = sat_stats[nm]["full_off"]
+                        s_non = sat_stats[nm]["no_night_worked"]
+                        s_nit = sat_stats[nm]["nights"]
+                        sat_ok = (s_off >= 1) and (s_nit == 2) 
+                        sat_icon = "✅" if sat_ok else "⚠️"
+                        st.caption(f"{sat_icon} 休{s_off} | 日{s_non} | 晚{s_nit}")
+                    else:
+                        lim = a["custom_max"] if a["custom_max"] else 15
+                        msg = f"{a['nick']} (PT): {c_val}/{lim}"
+                        if c_val > lim: st.error(f"🔴 {msg}")
+                        else: st.info(f"🔵 {msg}")
+
+            if heaven_earth_warnings:
+                st.error("🚨 **天地班警告**\n\n" + "\n".join(heaven_earth_warnings))
+        
         # === 🤖 Gemini AI 助手區塊 ===
+        st.divider()
         st.subheader("🤖 Gemini AI 班表微調助手")
         if not HAS_AI_LIB:
             st.warning("請在終端機執行 `pip install google-generativeai` 即可啟用 AI 助手！")
@@ -1147,9 +1215,11 @@ elif step == "7. 排班與總管微調":
         st.divider()
         # === 以下為鎖定的 AgGrid 雙層渲染區域 ===
         padded_weeks = get_padded_weeks(y, m)
-        docs = get_active_doctors(); assts = get_active_assistants()
+        docs = get_active_doctors()
+        assts = get_active_assistants()
         asst_opts = [""] + [a["nick"] for a in assts]
-        n2nm = {a["nick"]: a["name"] for a in assts}; nm2n = {a["name"]: a["nick"] for a in assts}
+        n2nm = {a["nick"]: a["name"] for a in assts}
+        nm2n = {a["name"]: a["nick"] for a in assts}
         edited_res = st.session_state.result.copy()
         
         with st.form("schedule_adjust_form"):
@@ -1184,7 +1254,7 @@ elif step == "7. 排班與總管微調":
                     rows.append(row)
                     
                 df = pd.DataFrame(rows)
-                col_defs = [{"headerName": "人員", "field": "person", "pinned": "left", "width": 120, "editable": False, "cellStyle": {"fontWeight": "bold", "borderRight": "2px solid #333", "backgroundColor": "#fff"}}]
+                col_defs = [{"headerName": "人員", "field": "person", "pinned": "left", "width": 90, "editable": False, "cellStyle": {"fontWeight": "bold", "borderRight": "2px solid #333", "backgroundColor": "#fff"}}]
                 
                 for d_info in w_dates:
                     is_odd = (d_info["date"].weekday() % 2 == 0)
@@ -1197,7 +1267,7 @@ elif step == "7. 排班與總管微調":
                         children.append({
                             "headerName": s, "field": f, "editable": d_info["is_curr"],
                             "cellEditor": "agSelectCellEditor", "cellEditorParams": {"values": asst_opts},
-                            "cellClass": "is_odd" if is_odd else "is_even", "cellStyle": cell_style_js, "width": 70
+                            "cellClass": "is_odd" if is_odd else "is_even", "cellStyle": cell_style_js, "width": 50
                         })
                     col_defs.append({"headerName": d_info["disp"], "children": children, "headerClass": h_class})
                     
@@ -1234,67 +1304,6 @@ elif step == "7. 排班與總管微調":
                 st.session_state.result = edited_res
                 st.session_state["sys_msg"] = "✅ 總管班表微調已儲存，演算法及防呆指標更新完畢！"
                 st.rerun()
-
-        # --- 統計面板 ---
-        st.subheader("📊 即時診數與週六指標")
-        curr_counts = {a["name"]: 0 for a in assts}
-        sat_dates = [str(dt) for dt in dates if dt.weekday() == 5]
-        sat_stats = {a["name"]: {"worked_days": 0, "nights": 0, "no_night_worked": 0, "full_off": 0} for a in assts}
-        daily_shifts = collections.defaultdict(lambda: collections.defaultdict(set))
-        
-        for k, v in st.session_state.result.items():
-            dt_str, sh = k.split("_")
-            ppl = list(v["doctors"].values()) + v["counter"] + v["floater"] + v.get("look", [])
-            for p in ppl: 
-                if p:
-                    daily_shifts[p][dt_str].add(sh)
-                    curr_counts[p] += 1
-                    
-        for a in assts:
-            nm = a["name"]
-            for d in sat_dates:
-                shifts = daily_shifts[nm][d]
-                if shifts:
-                    sat_stats[nm]["worked_days"] += 1
-                    if "晚" in shifts: sat_stats[nm]["nights"] += 1
-                    else: sat_stats[nm]["no_night_worked"] += 1
-                else:
-                    sat_stats[nm]["full_off"] += 1
-
-        heaven_earth_warnings = []
-        
-        c_stats1, c_stats2 = st.columns(2)
-        for idx, a in enumerate(assts):
-            nm = a["name"]; c_val = curr_counts[nm]
-            target_col = c_stats1 if idx % 2 == 0 else c_stats2
-            
-            for d_str, shifts in daily_shifts[nm].items():
-                if "早" in shifts and "晚" in shifts and "午" not in shifts:
-                    heaven_earth_warnings.append(f"{a['nick']} 在 {d_str} 被排了天地班！")
-            
-            with target_col:
-                if a["type"] == "全職":
-                    lim = std_max; target = std_min if a["pref"] == "low" else std_max
-                    msg = f"{a['nick']}: {c_val} (標:{target})"
-                    if c_val < std_min: st.warning(f"🟡 {msg}")
-                    elif c_val > lim: st.error(f"🔴 {msg} 爆")
-                    else: st.success(f"🟢 {msg}")
-                    
-                    s_off = sat_stats[nm]["full_off"]
-                    s_non = sat_stats[nm]["no_night_worked"]
-                    s_nit = sat_stats[nm]["nights"]
-                    sat_ok = (s_off >= 1) and (s_nit == 2) 
-                    sat_icon = "✅" if sat_ok else "⚠️"
-                    st.caption(f"{sat_icon} 週六: 全休{s_off} | 日班{s_non} | 晚班{s_nit}")
-                else:
-                    lim = a["custom_max"] if a["custom_max"] else 15
-                    msg = f"{a['nick']} (PT): {c_val}/{lim}"
-                    if c_val > lim: st.error(f"🔴 {msg}")
-                    else: st.info(f"🔵 {msg}")
-
-        if heaven_earth_warnings:
-            st.markdown("---")
-            st.error("🚨 **天地班警告**\n\n" + "\n".join(heaven_earth_warnings))
 
 elif step == "8. 報表下載":
     st.header("下載 Excel 報表")
