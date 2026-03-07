@@ -24,17 +24,22 @@ except ImportError:
     HAS_AI_LIB = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v19.1 (AI 鎖定版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v19.2 (完美連動版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 # --- 阻擋未安裝套件的狀態 ---
 if not HAS_AGGRID:
     st.error("🚨 **系統升級通知：需要安裝專業表格套件！** 🚨")
     st.markdown("""
-    👉 **請在您的終端機 (Terminal) 執行以下指令進行安裝：**
+    👉 **請確認您的 `requirements.txt` 中包含以下內容：**
+    ```text
+    streamlit
+    pandas
+    streamlit-aggrid
+    google-generativeai
+    ```
+    安裝完成後，請重新整理此網頁或重新執行程式，即可看見完美的排班表格！
     """)
-    st.code("pip install streamlit-aggrid google-generativeai", language="bash")
-    st.warning("安裝完成後，請重新整理此網頁或重新執行程式，即可看見完美的排班表格！")
     st.stop()
 
 # === 外觀鎖定區 (絕對不動) ===
@@ -609,7 +614,7 @@ def to_excel_doctor_confirmed(manual_schedule, year, month, doc_name):
     return output
 
 # --- 7. UI 介面 ---
-st.title("🦷 祐德牙醫 - 智慧排班系統 v19.1 (AI 鎖定版)")
+st.title("🦷 祐德牙醫 - 智慧排班系統 v19.2 (完美連動版)")
 
 is_locked_system = st.session_state.config.get("is_locked", False)
 
@@ -761,6 +766,18 @@ elif step == "3. 助理進階限制":
 elif step == "4. 醫師範本與生成":
     st.header("醫師班表範本與初始化")
     
+    # 年月設定與儲存
+    c1, c2, c3 = st.columns(3)
+    y = c1.number_input("年", 2025, 2030, st.session_state.config.get("year", datetime.today().year))
+    m = c2.number_input("月", 1, 12, st.session_state.config.get("month", datetime.today().month % 12 + 1))
+    first_week_setting = c3.radio("畫面【第 1 週】設定為：", ["單週", "雙週"], horizontal=True)
+    is_first_odd = (first_week_setting == "單週")
+    
+    st.session_state.config["year"] = y
+    st.session_state.config["month"] = m
+    
+    st.info("💡 **全新體驗：** 現在點擊下方【儲存並自動套用】按鈕，系統會將您勾選的範本 **自動覆蓋並寫入本月的醫師班表** 中，您到「步驟 5」就可以直接看到結果囉！")
+    
     doc_names = [d["name"] for d in get_active_doctors()]
     days = ["一", "二", "三", "四", "五", "六"]
     
@@ -792,41 +809,47 @@ elif step == "4. 醫師範本與生成":
             })
             
         go = {"columnDefs": col_defs, "defaultColDef": {"suppressMovable": True}, "rowHeight": 45, "headerHeight": 40}
+        
+        # AgGrid 會自動在背景抓取最新的狀態
         res = AgGrid(df, gridOptions=go, allow_unsafe_jscode=True, fit_columns_on_grid_load=False, update_mode=GridUpdateMode.MODEL_CHANGED, theme="alpine", key=f"ag_{key}")
-        return res['data']
+        
+        # 背景無縫更新 session_state，預防按鈕導致的 state loss
+        grid_data = res['data']
+        if grid_data is not None and len(grid_data) > 0:
+            records = grid_data.to_dict('records') if isinstance(grid_data, pd.DataFrame) else grid_data
+            new_res = {}
+            for row in records:
+                doc_clean = row["doctor"].replace("👨‍⚕️ ", "")
+                vals = []
+                for d in days:
+                    for s in ["早", "午", "晚"]:
+                        val = row.get(f"星期{d}_{s}", False)
+                        # 避免 AgGrid 將 False 轉為字串 "false" 導致全選的 Bug
+                        if isinstance(val, str): val = val.lower() == 'true'
+                        vals.append(bool(val))
+                new_res[doc_clean] = vals
+            st.session_state.config[key] = new_res
+        
+        return new_res
 
     t1, t2 = st.tabs(["單週範本", "雙週範本"])
-    with t1: odd_data = render_template_aggrid("template_odd")
-    with t2: even_data = render_template_aggrid("template_even")
+    with t1: render_template_aggrid("template_odd")
+    with t2: render_template_aggrid("template_even")
     
-    if st.button("💾 存範本", type="primary"):
-        def save_ag(grid_data, config_key):
-            res = {}
-            if grid_data is not None and len(grid_data) > 0:
-                if isinstance(grid_data, pd.DataFrame): records = grid_data.to_dict('records')
-                else: records = grid_data
-                for row in records:
-                    doc_clean = row["doctor"].replace("👨‍⚕️ ", "")
-                    vals = []
-                    for d in days:
-                        for s in ["早", "午", "晚"]: vals.append(bool(row[f"星期{d}_{s}"]))
-                    res[doc_clean] = vals
-                st.session_state.config[config_key] = res
-        save_ag(odd_data, "template_odd"); save_ag(even_data, "template_even"); save_config(st.session_state.config)
-        st.session_state["sys_msg"] = "✅ 雙/單週範本儲存成功！"; st.rerun()
+    col_btn1, col_btn2 = st.columns(2)
+    
+    if col_btn1.button("💾 僅儲存範本 (不覆蓋本月)"):
+        save_config(st.session_state.config)
+        st.session_state["sys_msg"] = "✅ 雙/單週範本已儲存成功！(尚未套用至本月班表)"
+        st.rerun()
         
-    st.divider()
-    st.subheader("生成本月初始班表")
-    c1, c2, c3 = st.columns(3)
-    y = c1.number_input("年", 2025, 2030, st.session_state.config.get("year", datetime.today().year))
-    m = c2.number_input("月", 1, 12, st.session_state.config.get("month", datetime.today().month % 12 + 1))
-    first_week_setting = c3.radio("畫面【第 1 週】設定為：", ["單週", "雙週"])
-    is_first_odd = (first_week_setting == "單週")
-    
-    if st.button("🚀 一鍵生成本月初始班表"):
-        st.session_state.config["year"] = y; st.session_state.config["month"] = m
+    if col_btn2.button("🚀 儲存範本並自動套用至本月", type="primary"):
+        save_config(st.session_state.config)
+        
+        # 自動執行生成初始班表的邏輯
         generated = []
-        t_odd = st.session_state.config.get("template_odd", {}); t_even = st.session_state.config.get("template_even", {})
+        t_odd = st.session_state.config.get("template_odd", {})
+        t_even = st.session_state.config.get("template_even", {})
         
         dates = generate_month_dates(y, m)
         weeks_dict = collections.defaultdict(list)
@@ -845,13 +868,15 @@ elif step == "4. 醫師範本與生成":
                         if dn in tmpl and idx < len(tmpl[dn]) and tmpl[dn][idx]:
                             generated.append({"Date": str(dt), "Shift": s, "Doctor": dn})
                             
-        st.session_state.config["manual_schedule"] = generated; save_config(st.session_state.config)
-        st.session_state["sys_msg"] = f"✅ 初始班表生成完畢！畫面第 1 週已精準套用【{first_week_setting}】範本。"; st.rerun()
+        st.session_state.config["manual_schedule"] = generated
+        save_config(st.session_state.config)
+        st.session_state["sys_msg"] = "✅ 範本已儲存，並成功為您套用至本月份！請至「步驟 5」查看結果。"
+        st.rerun()
 
 elif step == "5. 👨‍⚕️ 醫師專屬入口":
     st.header("👨‍⚕️ 醫師個人班表確認與修改")
     if is_locked_system: st.error("🔒 修改期限已過，目前為唯讀模式。")
-    else: st.info("💡 預設已為您帶入「步驟 4」生成的初始排班範本！\n\n請選擇您的名字。若要請假請將勾選取消；若要加診請打勾。反黑區域 (⬛) 不可點選。")
+    else: st.info("💡 若此處為空，請確認您已在「步驟 4」點擊【儲存範本並自動套用至本月】。\n\n請選擇您的名字。若要請假請將勾選取消；若要加診請打勾。反黑區域 (⬛) 不可點選。")
         
     docs = get_active_doctors()
     if docs:
@@ -1130,6 +1155,9 @@ elif step == "7. 排班與總管微調":
         with st.form("schedule_adjust_form"):
             st.subheader("📝 班表微調區 (AgGrid 雙層表頭版)")
             
+            # 使用列表保存所有的 grid_data 以便一次性儲存
+            all_grids_data = []
+            
             for w_idx, w_dates in enumerate(padded_weeks):
                 st.markdown(f"#### 第 {w_idx+1} 週")
                 
@@ -1176,30 +1204,33 @@ elif step == "7. 排班與總管微調":
                 go = {"columnDefs": col_defs, "defaultColDef": {"suppressMovable": True}, "rowHeight": 40, "headerHeight": 40}
                 res = AgGrid(df, gridOptions=go, allow_unsafe_jscode=True, fit_columns_on_grid_load=False, update_mode=GridUpdateMode.MODEL_CHANGED, theme="alpine", key=f"ag_sch_{w_idx}")
                 
-                grid_data = res['data']
-                if grid_data is not None and len(grid_data) > 0:
-                    if isinstance(grid_data, pd.DataFrame): records = grid_data.to_dict('records')
-                    else: records = grid_data
-                    
-                    for row in records:
-                        p_type = row.get("type"); p_name = row.get("name")
-                        p_key = row.get("key"); p_idx = row.get("idx")
-                        
-                        for d_info in w_dates:
-                            if not d_info["is_curr"]: continue
-                            for s in ["早", "午", "晚"]:
-                                field = f"{d_info['str']}_{s}"
-                                val = row.get(field, "")
-                                v_name = n2nm.get(val, "")
-                                k = field
-                                
-                                if p_type == "doc": edited_res[k]["doctors"][p_name] = v_name
-                                elif p_type == "role":
-                                    if p_key not in edited_res[k]: edited_res[k][p_key] = []
-                                    while len(edited_res[k][p_key]) <= p_idx: edited_res[k][p_key].append("")
-                                    edited_res[k][p_key][p_idx] = v_name
+                all_grids_data.append((w_dates, res['data']))
 
             if st.form_submit_button("💾 儲存並更新數據", type="primary"):
+                # 一次處理所有網格的資料
+                for w_dates, grid_data in all_grids_data:
+                    if grid_data is not None and len(grid_data) > 0:
+                        if isinstance(grid_data, pd.DataFrame): records = grid_data.to_dict('records')
+                        else: records = grid_data
+                        
+                        for row in records:
+                            p_type = row.get("type"); p_name = row.get("name")
+                            p_key = row.get("key"); p_idx = row.get("idx")
+                            
+                            for d_info in w_dates:
+                                if not d_info["is_curr"]: continue
+                                for s in ["早", "午", "晚"]:
+                                    field = f"{d_info['str']}_{s}"
+                                    val = row.get(field, "")
+                                    v_name = n2nm.get(val, "")
+                                    k = field
+                                    
+                                    if p_type == "doc": edited_res[k]["doctors"][p_name] = v_name
+                                    elif p_type == "role":
+                                        if p_key not in edited_res[k]: edited_res[k][p_key] = []
+                                        while len(edited_res[k][p_key]) <= p_idx: edited_res[k][p_key].append("")
+                                        edited_res[k][p_key][p_idx] = v_name
+
                 st.session_state.result = edited_res
                 st.session_state["sys_msg"] = "✅ 總管班表微調已儲存，演算法及防呆指標更新完畢！"
                 st.rerun()
