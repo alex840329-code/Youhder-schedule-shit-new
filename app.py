@@ -298,7 +298,8 @@ def parse_command_local(cmd, year, month, docs, assts):
     lines = cmd.replace("，", "\n").replace("、", "\n").split("\n")
     
     for line in lines:
-        line = line.strip(); if not line: continue
+        line = line.strip()
+        if not line: continue
         
         # Rule 1: 醫師給助理跟診 (例: 峻豪醫師禮拜四整天給昀霏跟)
         m1 = re.search(r'(.*?)(?:醫師)?.*?(?:禮拜|星期)([一二三四五六日天])(?:(整天|早上|下午|晚上|早|午|晚|早午))?(?:給|讓|由)?(.*?)跟', line)
@@ -848,12 +849,11 @@ elif step == "7. 排班微調":
                                                 if not is_assigned:
                                                     for i in range(len(v["floater"])):
                                                         if not v["floater"][i]: v["floater"][i] = anm; break
-                                                    else: v["floater"].append(anm) 
-                                                        
-                                st.session_state.result = er; st.session_state.config["saved_result"] = er; save_config(st.session_state.config); st.rerun()
+                                                    else: v["floater"].append(anm)
+                                                
                             except Exception as e: st.error(f"AI 解析失敗，可能是指令過於模糊或回傳格式錯誤。詳細錯誤：{e}")
 
-        p_weeks = get_padded_weeks(y, m); a_opts = [""] + [a["nick"] for a in get_active_assistants()]
+        docs = get_active_doctors(); p_weeks = get_padded_weeks(y, m); a_opts = [""] + [a["nick"] for a in get_active_assistants()]
         nm2n = {a["name"]: a["nick"] for a in get_active_assistants()}; n2nm = {a["nick"]: a["name"] for a in get_active_assistants()}
         leaves_data = st.session_state.config.get("leaves", {})
         
@@ -900,6 +900,7 @@ elif step == "7. 排班微調":
                 st.markdown("<br>", unsafe_allow_html=True)
 
             if st.form_submit_button("💾 同步更新與儲存"):
+                # 直接儲存 session_state 裡面的值
                 st.session_state.config["saved_result"] = st.session_state.result; save_config(st.session_state.config); st.rerun()
 
 elif step == "8. 報表下載":
