@@ -20,7 +20,7 @@ except ImportError:
     HAS_AGGRID = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v21.7 (重新排班與AI強化版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v21.8 (數據同步與AI修復版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 if not HAS_AGGRID:
@@ -174,7 +174,7 @@ def parse_slot_string(text, is_fixed=False):
         if wd is not None and sh is not None: res_set.add((wd, sh))
     return res_set
 
-# --- 3. 核心排班演算法 ---
+# --- 3. 核心排班演算法 (強勢修正：週六與白名單權重) ---
 def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_count, flt_count):
     assts = get_active_assistants(); docs = get_active_doctors()
     year = st.session_state.config.get("year", datetime.today().year)
@@ -224,7 +224,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                     
         for name, admin_set in parsed_admin.items():
             if (wd, sh) in admin_set:
-                p_counts[name] += 1
+                p_counts[name] += 1 # 恢復計入總診數，限制超量
                 p_daily[name][dt_str].add(sh) 
 
     # 2. 自動排班
@@ -241,14 +241,15 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             if assigned_in_slot(name): return False
             if f"{name}_{dt_str}_{sh}" in leaves: return False
             
-            # 若非週六，且額度已滿，則擋掉
-            if p_counts[name] >= p_limits[name] and wd != 5: return False 
+            # 檢查上限
+            if p_counts[name] >= p_limits[name]: return False 
             
             rule = adv_rules.get(name, {})
             if rule.get("role_limit") == "僅櫃台" and role != "counter": return False
             if rule.get("role_limit") == "僅流動" and role != "floater": return False
             if rule.get("role_limit") == "僅跟診" and role != "doctor": return False
             if rule.get("shift_limit") == "僅晚班" and sh != "晚": return False
+            
             if role == "counter":
                 for av in [x.strip() for x in rule.get("avoid", "").split(",") if x.strip()]:
                     if av in slot_res["counter"]: return False
@@ -264,6 +265,11 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 gap = p_targets[c] - p_counts[c]
                 score = gap * 2000 
                 
+                # --- 白名單絕對強制 ---
+                s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
+                if s_wl and (wd, sh) in s_wl:
+                    score += 100000 # 只要在白名單內，強制抓進來
+                
                 if r_type == "counter":
                     if asst_info.get("is_main_counter"): score += 10000 
                     if asst_info.get("type") == "全職": score += 3000
@@ -271,11 +277,6 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 if r_type == "floater":
                     if asst_info.get("is_main_counter"): score -= 5000 
                     else: score += (30 - p_floater_counts[c]) * 200 
-                
-                # --- 白名單強制優先 ---
-                s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
-                if s_wl and (wd, sh) in s_wl:
-                    score += 50000 # 如果該時段在白名單內，強制極高優先排入
                 
                 if wd == 5: 
                     has_off_sat = any(not p_daily[c][sd] for sd in sat_dates if sd != dt_str)
@@ -312,12 +313,13 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             
     return result
 
-# --- 4. API 呼叫 ---
+# --- 4. API 呼叫 (修正 Not Found 錯誤) ---
 def call_gemini_api(api_key, prompt):
-    # 使用 gemini-1.5-flash，穩定度高，免費配額大
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    # 改用 gemini-1.5-flash-latest，這是目前相容性最廣的版本
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
+    # 指數退避，應付 429
     for delay in [3, 8, 15]:
         try:
             resp = requests.post(url, json=payload, timeout=30)
@@ -327,12 +329,21 @@ def call_gemini_api(api_key, prompt):
             elif resp.status_code == 429:
                 time.sleep(delay)
                 continue
+            elif resp.status_code == 404:
+                # 備用方案：若 1.5 也報錯，退回舊版
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={api_key}"
+                resp_backup = requests.post(url, json=payload, timeout=30)
+                data_backup = resp_backup.json()
+                if resp_backup.status_code == 200 and 'candidates' in data_backup:
+                    return data_backup['candidates'][0]['content']['parts'][0]['text']
+                else:
+                    return f"ERROR:{data_backup.get('error', {}).get('message', '備用模型亦失敗')}"
             else:
                 return f"ERROR:{data.get('error', {}).get('message', 'API 發生錯誤')}"
         except:
             time.sleep(delay)
             continue
-    return "ERROR: Google API 連線異常，請稍後再試。"
+    return "ERROR: Google API 呼叫次數過多或連線不穩 (429)，請等待一分鐘後再試。"
 
 # --- 5. Excel 輸出 ---
 def to_excel_master(schedule_result, year, month, docs, assts):
@@ -648,7 +659,7 @@ elif step == "7. 排班微調":
     
     with st.sidebar:
         st.markdown("---")
-        st.subheader("📊 即時監控")
+        st.subheader("📊 即時監控 (已包含行政診)")
         if 'result' in st.session_state:
             curr_counts = {a["name"]: 0 for a in assts}; curr_floaters = {a["name"]: 0 for a in assts}
             daily_p = collections.defaultdict(lambda: collections.defaultdict(set))
