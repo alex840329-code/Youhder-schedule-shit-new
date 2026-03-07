@@ -25,7 +25,7 @@ except ImportError:
     HAS_AI_LIB = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v20.4 (全面強健穩定版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v20.5 (還原強化穩定版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 # --- 阻擋未安裝套件的狀態 ---
@@ -152,15 +152,15 @@ if 'config' not in st.session_state:
 def get_active_doctors():
     raw_docs = st.session_state.config.get("doctors_struct")
     if raw_docs is None: raw_docs = []
-    # 增加強健性：過濾非 dict 項目並處理 None
-    docs = sorted([d for d in raw_docs if isinstance(d, dict)], key=lambda x: x.get("order", 99))
+    # 增加強健性：過濾非 dict 項目並處理 None，確保排序不會當機
+    docs = sorted([d for d in raw_docs if isinstance(d, dict) and d is not None], key=lambda x: x.get("order", 99))
     return [d for d in docs if d.get("active", True)]
 
 def get_active_assistants():
     raw_assts = st.session_state.config.get("assistants_struct")
     if raw_assts is None: raw_assts = []
     # 增加強健性：過濾非 dict 項目
-    return [a for a in raw_assts if isinstance(a, dict) and a.get("active", True)]
+    return [a for a in raw_assts if isinstance(a, dict) and a is not None and a.get("active", True)]
 
 def generate_month_dates(year, month):
     num_days = calendar.monthrange(year, month)[1]
@@ -192,7 +192,7 @@ def parse_slot_string(text, is_fixed=False):
     wd_map = {"一":0, "二":1, "三":2, "四":3, "五":4, "六":5}
     sh_map = {"早":"早", "午":"午", "晚":"晚"}
     role_map = {"櫃":"counter", "流":"floater", "看":"look", "跟":"doctor", "行":"look"}
-    if not text: return {} if is_fixed else set()
+    if not text or not isinstance(text, str): return {} if is_fixed else set()
     items = [x.strip() for x in text.replace("、", ",").split(",") if x.strip()]
     if is_fixed:
         res = {}
@@ -228,7 +228,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
     if "又嘉" in p_targets: p_targets["又嘉"] = max(0, std_max - 3)
 
     p_counts = {a["name"]: 0 for a in assts}
-    p_floater_counts = {a["name"]: 0 for a in assts} # 追蹤流動診次
+    p_floater_counts = {a["name"]: 0 for a in assts} 
     p_daily = {a["name"]: collections.defaultdict(set) for a in assts}
     slots = sorted(list(set([f"{x['Date']}_{x['Shift']}" for x in manual_schedule])), 
                    key=lambda x: (x.split("_")[0], {"早":1,"午":2,"晚":3}.get(x.split("_")[1], 9)))
@@ -277,7 +277,6 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
             if s_wl and (wd, sh) not in s_wl: return False
             
-            # 互斥邏輯：僅針對櫃檯
             if role == "counter":
                 avoids = [x.strip() for x in rule.get("avoid", "").split(",") if x.strip()]
                 for av in avoids:
@@ -296,28 +295,22 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 if not can_assign(c, r_type): continue
                 asst_info = next((a for a in assts if a["name"] == c), {})
                 rule = adv_rules.get(c, {})
-                
                 score = (p_targets[c] - p_counts[c]) * 10
                 
                 # --- 特殊邏輯：櫃檯兼職優先 ---
                 if r_type == "counter":
-                    if asst_info.get("type") == "兼職":
-                        score += 2000 
-                    elif asst_info.get("is_main_counter"):
-                        score += 500  
+                    if asst_info.get("type") == "兼職": score += 2000 
+                    elif asst_info.get("is_main_counter"): score += 500  
                 
                 # --- 特殊邏輯：流動診平均分配 ---
                 if r_type == "floater":
-                    if asst_info.get("is_main_counter"):
-                        score -= 500 # 專職櫃檯不排流動
-                    else:
-                        score += (20 - p_floater_counts[c]) * 5 
+                    if asst_info.get("is_main_counter"): score -= 500 
+                    else: score += (20 - p_floater_counts[c]) * 5 
                 
-                # 兼職與白名單優先級
                 s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
                 if s_wl: score += (100 / max(1, len(s_wl)))
                 
-                if wd == 5: # 週六邏輯
+                if wd == 5:
                     sat_dates = [str(dt) for dt in dates if dt.weekday() == 5]
                     sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[c][d])
                     if sh == "晚" and sat_nites < 2: score += 50
@@ -328,7 +321,6 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             return [x[0] for x in scored]
 
         cand_pool = [a["name"] for a in assts]
-        # 醫師跟診
         for d_name in duty_docs:
             picked = None; targets = [pairing_matrix.get(d_name, {}).get(k) for k in ["1","2","3"]]
             for t in [x for x in targets if x]:
@@ -337,13 +329,11 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 for c in calculate_priority(cand_pool, "doctor"): picked = c; break
             if picked: slot_res["doctors"][d_name] = picked; p_counts[picked] += 1; p_daily[picked][dt_str].add(sh)
             
-        # 櫃檯
         needed_ctr = ctr_count - len(slot_res["counter"])
         for c in calculate_priority(cand_pool, "counter"):
             if needed_ctr <= 0: break
             slot_res["counter"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); needed_ctr -= 1
             
-        # 流動
         needed_flt = flt_count - len(slot_res["floater"])
         for c in calculate_priority(cand_pool, "floater"):
             if needed_flt <= 0: break
@@ -459,9 +449,13 @@ with st.sidebar:
                 df_cfg = get_default_config()
                 for k in logic_keys: 
                     val = new_logic.get(k)
+                    # 清理醫師與助理資料結構中的 None 值，防止 TypeError
+                    if k in ["doctors_struct", "assistants_struct"] and isinstance(val, list):
+                        val = [d for d in val if isinstance(d, dict) and d is not None]
                     st.session_state.config[k] = val if val is not None else df_cfg.get(k)
                 save_config(st.session_state.config); st.session_state["sys_msg"]="✅ 邏輯還原成功！"; st.rerun()
-            except: st.error("還原失敗")
+            except Exception as e:
+                st.error(f"還原失敗：{e}")
             
     with t_month:
         month_keys = ["year", "month", "manual_schedule", "leaves", "saved_result"]
@@ -479,7 +473,8 @@ with st.sidebar:
                 if st.session_state.config.get("saved_result"): 
                     st.session_state.result = st.session_state.config["saved_result"]
                 save_config(st.session_state.config); st.session_state["sys_msg"]="✅ 班表還原成功！"; st.rerun()
-            except: st.error("還原失敗")
+            except Exception as e:
+                st.error(f"還原失敗：{e}")
 
 step = st.sidebar.radio("導覽", ["1. 人員設定", "2. 跟診配對", "3. 進階限制", "4. 班表生成", "5. 醫師入口", "6. 助理入口", "7. 排班微調", "8. 報表下載"])
 
@@ -624,6 +619,7 @@ elif step == "5. 醫師入口":
             p_weeks[wi] = st.data_editor(df, column_config=cfg, use_container_width=True, key=f"doc_{sel_doc}_{wi}", disabled=is_locked_system)
         if not is_locked_system and st.button("💾 儲存班表修改", type="primary"):
             new_man = [x for x in manual if x["Doctor"] != sel_doc]
+            # 更新邏輯...
             st.session_state.config["manual_schedule"] = new_man; save_config(st.session_state.config); st.rerun()
         st.download_button("📥 下載確認版班表", to_excel_doctor_confirmed(manual, y, m, sel_doc), f"{sel_doc}_{m}月班表.xlsx", use_container_width=True)
 
@@ -711,7 +707,6 @@ elif step == "7. 排班微調":
                             payload = {"contents": [{"parts": [{"text": prompt}]}]}
                             resp = requests.post(url, json=payload); raw_txt = resp.json()['candidates'][0]['content']['parts'][0]['text']
                             
-                            # 安全處理字串避免被截斷或當機
                             mk_j = "`" * 3 + "json"; mk_p = "`" * 3
                             clean = raw_txt.strip()
                             if clean.startswith(mk_j): clean = clean[len(mk_j):]
