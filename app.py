@@ -5,36 +5,46 @@ def to_excel_master(schedule_result, year, month, docs, assts):
     
     padded_weeks = get_padded_weeks(year, month)
     
-    # 標題只寫一次在最上方
-    sheet.merge_range(0, 0, 0, 18, f"祐德牙醫診所 {month}月 班表", fmts['h_title_big'])
-    sheet.set_row(0, 35) # 加高
-    sheet.set_column(0, 0, 11) # 人員欄寬
-    for c in range(1, 19): sheet.set_column(c, c, 4.5) # 班表欄寬
+    # 標題只寫一次在最上方，並跨越所有欄位 (7天 * 3時段 = 21, 加上名稱欄 = 22)
+    sheet.merge_range(0, 0, 0, 21, f"祐德牙醫診所 {month}月 班表", fmts['h_title_big'])
+    sheet.set_row(0, 40) # 加高標題行
+    sheet.set_column(0, 0, 11) # 人員名稱欄寬
+    for c in range(1, 22): sheet.set_column(c, c, 4.5) # 班表時段欄寬
     
     row = 1
     for w_dates in padded_weeks:
+        # 寫入日期列
         sheet.write(row, 0, "日期", fmts['name_col']); col = 1
         for dt in w_dates:
+            # 判斷是否為單數日或非本月
             is_odd = dt['date'].weekday() % 2 == 0
             h_fmt = fmts['head_odd'] if is_odd else fmts['head_even']
             if not dt['is_curr']: h_fmt = fmts['gray_head']
+            
             sheet.merge_range(row, col, row, col+2, dt['disp'], h_fmt)
             col += 3
         row += 1
         
+        # 寫入早中晚列
         sheet.write(row, 0, "時段", fmts['name_col']); col = 1
         for dt in w_dates:
             is_odd = dt['date'].weekday() % 2 == 0
             f_m = fmts['morn_odd'] if is_odd else fmts['morn_even']
             f_a = fmts['aft_odd'] if is_odd else fmts['aft_even']
             f_e = fmts['eve_odd'] if is_odd else fmts['eve_even']
-            if not dt['is_curr']: f_m = f_a = fmts['gray']; f_e = fmts['gray_eve']
+            
+            # 非本月的格子變灰
+            if not dt['is_curr']: 
+                f_m = f_a = fmts['gray']
+                f_e = fmts['gray_eve']
+                
             sheet.write(row, col, "早", f_m)
             sheet.write(row, col+1, "午", f_a)
             sheet.write(row, col+2, "晚", f_e)
             col += 3
         row += 1
         
+        # 寫入醫師班表
         for doc in docs:
             sheet.write(row, 0, doc["nick"], fmts['name_col']); col = 1
             for dt in w_dates:
@@ -42,7 +52,10 @@ def to_excel_master(schedule_result, year, month, docs, assts):
                 f_m = fmts['morn_odd'] if is_odd else fmts['morn_even']
                 f_a = fmts['aft_odd'] if is_odd else fmts['aft_even']
                 f_e = fmts['eve_odd'] if is_odd else fmts['eve_even']
-                if not dt['is_curr']: f_m = f_a = fmts['gray']; f_e = fmts['gray_eve']
+                
+                if not dt['is_curr']: 
+                    f_m = f_a = fmts['gray']
+                    f_e = fmts['gray_eve']
                 
                 for i, sh in enumerate(["早", "午", "晚"]):
                     fmt = [f_m, f_a, f_e][i]
@@ -55,6 +68,7 @@ def to_excel_master(schedule_result, year, month, docs, assts):
                 col += 3
             row += 1
             
+        # 寫入助理班表
         for rnm, rk, ri in [("櫃1","counter",0), ("櫃2","counter",1), ("流動","floater",0), ("流動2","floater",1), ("看/行","look",0)]:
             sheet.write(row, 0, rnm, fmts['name_col']); col = 1
             for dt in w_dates:
@@ -62,7 +76,10 @@ def to_excel_master(schedule_result, year, month, docs, assts):
                 f_m = fmts['morn_odd'] if is_odd else fmts['morn_even']
                 f_a = fmts['aft_odd'] if is_odd else fmts['aft_even']
                 f_e = fmts['eve_odd'] if is_odd else fmts['eve_even']
-                if not dt['is_curr']: f_m = f_a = fmts['gray']; f_e = fmts['gray_eve']
+                
+                if not dt['is_curr']: 
+                    f_m = f_a = fmts['gray']
+                    f_e = fmts['gray_eve']
                 
                 for i, sh in enumerate(["早", "午", "晚"]):
                     fmt = [f_m, f_a, f_e][i]
@@ -74,7 +91,8 @@ def to_excel_master(schedule_result, year, month, docs, assts):
                     sheet.write(row, col+i, val, fmt)
                 col += 3
             row += 1
-        row += 1 # Empty row
+            
+        row += 1 # 每一週之間空一行
         
     writer.close(); output.seek(0); return output
 
@@ -161,14 +179,3 @@ def to_excel_individual(schedule_result, year, month, assts, docs):
     writer.close(); output.seek(0); return output
 
 def to_excel_doctor_confirmed(manual_schedule, year, month, doc_name):
-    output = io.BytesIO(); writer = pd.ExcelWriter(output, engine='xlsxwriter'); workbook = writer.book
-    fmts = get_excel_formats(workbook); dates = generate_month_dates(year, month)
-    s = workbook.add_worksheet("確認班表")
-    s.merge_range(0, 0, 0, 4, f"{doc_name} - {year}/{month} 班表", fmts['h_title_big'])
-    for i, h in enumerate(["日期","星期","早","午","晚"]): s.write(2, i, h, fmts['h_col'])
-    for r, dt in enumerate(dates):
-        s.write(r+3, 0, f"{dt.month}/{dt.day}", fmts['c_norm']); s.write(r+3, 1, ['一','二','三','四','五','六'][dt.weekday()], fmts['c_norm'])
-        for ci, sh in enumerate(["早","午","晚"]):
-            is_wk = any(x for x in manual_schedule if x["Date"]==str(dt) and x["Shift"]==sh and x["Doctor"]==doc_name)
-            s.write(r+3, 2+ci, "看診" if is_wk else "", fmts['c_norm'])
-    writer.close(); output.seek(0); return output
