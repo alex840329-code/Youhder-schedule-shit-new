@@ -233,7 +233,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         
         # --- 動態判斷是否需要流動 2 ---
         current_flt_count = flt_count
-        if len(duty_docs) >= 4:
+        if len(duty_docs) >= 5: # 改為 5 位醫師才觸發 2 位流動，節省人力
             current_flt_count = max(flt_count, 2)
         
         def assigned_in_slot(name):
@@ -342,7 +342,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         duty_docs = [x["Doctor"] for x in manual_schedule if x["Date"]==dt_str and x["Shift"]==sh]
         
         current_flt_count = flt_count
-        if len(duty_docs) >= 4:
+        if len(duty_docs) >= 5: # 改為 5 位醫師才觸發 2 位流動，節省人力
             current_flt_count = max(flt_count, 2)
             
         needed_ctr = ctr_count - len(slot_res["counter"])
