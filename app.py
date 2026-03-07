@@ -20,7 +20,7 @@ except ImportError:
     HAS_AGGRID = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v21.13 (動態流動與精準解析版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v21.14 (精準對齊與報表優化版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 if not HAS_AGGRID:
@@ -125,7 +125,7 @@ def get_padded_weeks(year, month):
         if curr > last_day and curr.weekday() == 0: break
         week_dates = []
         for _ in range(7):
-            if curr.weekday() != 6:
+            if curr.weekday() != 6: # 排除週日
                 is_curr = (curr.month == month)
                 week_dates.append({"date": curr, "is_curr": is_curr, "str": str(curr),
                     "disp": f"{curr.month}/{curr.day}({['一','二','三','四','五','六'][curr.weekday()]})" if is_curr else f"⬛ {curr.month}/{curr.day}"})
@@ -284,12 +284,11 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 score = gap * 2000 
                 
                 s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
-                if s_wl and (wd, sh) in s_wl: score += 500000 # 極高優先權確保白名單必排
+                if s_wl and (wd, sh) in s_wl: score += 500000 
                 
                 if r_type == "counter":
                     if asst_info.get("is_main_counter"): score += 50000 
                     if asst_info.get("type") == "兼職": score += 20000
-                    # 小瑜專屬通道：只要是晚班櫃檯，必定優先抓她
                     if rule.get("shift_limit") == "僅晚班" and sh == "晚": score += 200000
                 
                 if r_type == "floater":
@@ -304,9 +303,8 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
 
         cand_pool = [a["name"] for a in assts]
         
-        # 嚴格階段：醫師跟診 
         for d_name in duty_docs:
-            if d_name in slot_res["doctors"]: continue # 已經被 forced 指定
+            if d_name in slot_res["doctors"]: continue
             picked = None; targets = [pairing_matrix.get(d_name, {}).get(k) for k in ["1","2","3"]]
             for t in [x for x in targets if x]:
                 if can_assign_strict(t, "doctor"): picked = t; break
@@ -314,19 +312,17 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 for c in calculate_priority(cand_pool, "doctor", strict=True): picked = c; break
             if picked: slot_res["doctors"][d_name] = picked; p_counts[picked] += 1; p_daily[picked][dt_str].add(sh)
             
-        # 嚴格階段：櫃檯
         needed_ctr = ctr_count - len(slot_res["counter"])
         for c in calculate_priority(cand_pool, "counter", strict=True):
             if needed_ctr <= 0: break
             slot_res["counter"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); needed_ctr -= 1
             
-        # 嚴格階段：流動
         needed_flt = current_flt_count - len(slot_res["floater"])
         for c in calculate_priority(cand_pool, "floater", strict=True):
             if needed_flt <= 0: break
             slot_res["floater"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); p_floater_counts[c] += 1; needed_flt -= 1
 
-    # 3. 自動排班 (填洞救援階段 Relaxed Pass)
+    # 3. 自動排班 (填洞救援階段)
     for slot in slots:
         dt_str, sh = slot.split("_"); curr_dt = datetime.strptime(dt_str, "%Y-%m-%d").date(); wd = curr_dt.weekday()
         slot_res = result[slot]
@@ -346,11 +342,9 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             if f"{name}_{dt_str}_{sh}" in leaves: return False
             
             rule = adv_rules.get(name, {})
-            # 白名單依舊絕對不可侵犯
             s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
             if s_wl and (wd, sh) not in s_wl: return False
             
-            # 職位限制依舊不可侵犯
             if rule.get("role_limit") == "僅櫃台" and role != "counter": return False
             if rule.get("role_limit") == "僅流動" and role != "floater": return False
             if rule.get("role_limit") == "僅跟診" and role != "doctor": return False
@@ -358,7 +352,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             if rule.get("shift_limit") == "僅早班" and sh != "早": return False
             if rule.get("shift_limit") == "僅午班" and sh != "午": return False
             
-            return True # 無視總班數上限與週六鐵律
+            return True
 
         cand_pool = [a["name"] for a in assts]
         
@@ -406,7 +400,7 @@ def parse_command_local(cmd, year, month, docs, assts):
             continue
             
         # Rule 2: 特定第幾個星期幾上班/休假 (例: 欣霓第2個星期六早午上班)
-        m2 = re.search(r'([^\s]+?)\s*第\s*(\d+)\s*個(?:星期|禮拜)([一二三四五六日天])\s*(整天|早上|下午|晚上|早|午|晚|早午)?\s*(上班|排班|休假|請假|休息)', line)
+        m2 = re.search(r'([^\s]+?)\s*第\s*(\d+)\s*個(?:星期|禮拜)([一二三四五六日天])\s*(整天|早上|下午|晚上|早|午|晚|早午|早午晚)?\s*(上班|排班|休假|請假|休息)', line)
         if m2:
             person = fuzzy_match_person(m2.group(1), assts + docs)
             w_num = int(m2.group(2)); wd = wd_map.get(m2.group(3))
@@ -422,13 +416,13 @@ def parse_command_local(cmd, year, month, docs, assts):
                 else: acts.append({"action": act_type, "assistant": person, "weekday": wd, "week_number": w_num, "shift": s})
             continue
 
-        # Rule 3: 特定日期請假/排班 (例: 燿東醫師 4/10請假)
-        m3 = re.search(r'([^\s]+?)(?:醫師)?\s*(?:於)?\s*(\d+)[月/](\d+)[號日]?\s*(早上|下午|晚上|早|午|晚|整天|早午)?\s*(?:要|想)?(休假|請假|排班|上班|休息)', line)
+        # Rule 3: 升級版！精準抓取日期+星期+時段 (例: 欣霓4/11星期六早午上班)
+        m3 = re.search(r'([^\s]+?)(?:醫師)?\s*(?:於)?\s*(\d+)[月/](\d+)[號日]?\s*(?:星期|禮拜)?([一二三四五六日天])?\s*(早上|下午|晚上|早午晚|早午|午晚|早晚|早|午|晚|整天)?\s*(?:要|想)?(休假|請假|排班|上班|休息)', line)
         if m3:
             person = fuzzy_match_person(m3.group(1), assts + docs)
             date_str = f"{year}-{int(m3.group(2)):02d}-{int(m3.group(3)):02d}"
-            sh_str = m3.group(4) or "整天"
-            act_type = "leave" if any(x in m3.group(5) for x in ["休", "請", "息"]) else "force_assign"
+            sh_str = m3.group(5) or "整天"
+            act_type = "leave" if any(x in m3.group(6) for x in ["休", "請", "息"]) else "force_assign"
             shifts = []
             if "早" in sh_str or "整" in sh_str: shifts.append("早")
             if "午" in sh_str or "整" in sh_str or "下" in sh_str: shifts.append("午")
@@ -452,53 +446,109 @@ def call_gemini_api(api_key, prompt):
                 if resp.status_code == 200 and 'candidates' in resp.json():
                     return resp.json()['candidates'][0]['content']['parts'][0]['text']
                 elif resp.status_code == 429: time.sleep(delay); continue
-                elif resp.status_code == 404: break # 換下一個模型
+                elif resp.status_code == 404: break 
             except: time.sleep(delay); continue
     return "ERROR: Google API 額度耗盡或無可用模型，請改用「本地關鍵字解析」！"
 
 # --- 5. Excel 輸出 ---
+def get_excel_formats(workbook):
+    return {
+        'h_main_title': workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'font_size': 18}),
+        'h_name': workbook.add_format({'bold': True, 'align': 'left', 'valign': 'vcenter', 'font_size': 14}),
+        'h_col': workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#E0E0E0', 'border': 1}),
+        'c_norm': workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1}),
+        'c_wknd': workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FFF2CC'}),
+        
+        # 對應 AgGrid 奇數天(一三五) / 偶數天(二四六) / 灰階(非本月) 的顏色
+        'h_odd': workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#FFD966', 'border': 1}),
+        'h_even': workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#9DC3E6', 'border': 1}),
+        'h_gray': workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#E0E0E0', 'border': 1, 'font_color': '#808080'}),
+        
+        'c_odd_1': workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FDE9D9'}),
+        'c_odd_2': workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FCD5B4'}),
+        'c_odd_3': workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FABF8F', 'right': 2}),
+        
+        'c_even_1': workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#DDEBF7'}),
+        'c_even_2': workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#BDD7EE'}),
+        'c_even_3': workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#9DC3E6', 'right': 2}),
+        
+        'c_gray': workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#F0F0F0', 'font_color': '#A0A0A0'}),
+        'c_gray_edge': workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#F0F0F0', 'font_color': '#A0A0A0', 'right': 2}),
+        
+        'note_style': workbook.add_format({'align': 'left', 'valign': 'vcenter', 'font_size': 11, 'bold': False})
+    }
+
 def to_excel_master(schedule_result, year, month, docs, assts):
     output = io.BytesIO(); writer = pd.ExcelWriter(output, engine='xlsxwriter'); workbook = writer.book
     fmts = get_excel_formats(workbook); sheet = workbook.add_worksheet("總班表")
-    dates = generate_month_dates(year, month); weeks = collections.defaultdict(list)
-    for dt in dates: weeks[dt.isocalendar()[1]].append(dt)
-    row = 0
-    for wk_id, w_dates in enumerate(weeks.values()):
-        sheet.merge_range(row, 0, row, len(w_dates)*3, f"祐德牙醫 {year}年{month}月 班表", fmts['h_title']); row += 1
+    
+    # 標題單一行置頂，放大並跨欄合併
+    sheet.merge_range(0, 0, 0, 18, f"祐德牙醫診所 {month}月班表", fmts['h_main_title'])
+    sheet.set_row(0, 30)
+    
+    p_weeks = get_padded_weeks(year, month)
+    row = 2
+    
+    for w_dates in p_weeks:
+        # 1. 星期/日期標題列
         sheet.write(row, 0, "日期", fmts['h_col']); col = 1
         for dt in w_dates:
-            sheet.merge_range(row, col, row, col+2, f"{dt.month}/{dt.day} ({['一','二','三','四','五','六'][dt.weekday()]})", fmts['h_col']); col += 3
-        row += 1; sheet.write(row, 0, "時段", fmts['h_col']); col = 1
-        for dt in w_dates:
-            f = fmts['c_wknd'] if dt.weekday() == 5 else fmts['c_norm']
-            for s in ["早","午","晚"]: sheet.write(row, col, s, f); col += 1
+            is_even = dt["date"].weekday() % 2 != 0
+            f_head = fmts['h_even'] if is_even else fmts['h_odd']
+            if not dt["is_curr"]: f_head = fmts['h_gray']
+            
+            disp_text = f"{dt['date'].month}/{dt['date'].day} ({['一','二','三','四','五','六'][dt['date'].weekday()]})" if dt["is_curr"] else f"非本月 {dt['date'].month}/{dt['date'].day}"
+            sheet.merge_range(row, col, row, col+2, disp_text, f_head)
+            col += 3
         row += 1
+        
+        # 2. 早午晚時段標題列
+        sheet.write(row, 0, "時段", fmts['h_col']); col = 1
+        for dt in w_dates:
+            is_even = dt["date"].weekday() % 2 != 0
+            for i, s in enumerate(["早","午","晚"]):
+                if not dt["is_curr"]: f_cell = fmts['c_gray_edge'] if i == 2 else fmts['c_gray']
+                else: f_cell = [fmts['c_even_1'], fmts['c_even_2'], fmts['c_even_3']][i] if is_even else [fmts['c_odd_1'], fmts['c_odd_2'], fmts['c_odd_3']][i]
+                sheet.write(row, col, s, f_cell)
+                col += 1
+        row += 1
+        
+        # 3. 醫師與助理排班列
         for doc in docs:
             sheet.write(row, 0, doc["nick"], fmts['h_col']); col = 1
             for dt in w_dates:
-                f = fmts['c_wknd'] if dt.weekday() == 5 else fmts['c_norm']
-                for s in ["早","午","晚"]:
-                    k = f"{dt}_{s}"; anm = schedule_result.get(k, {}).get("doctors", {}).get(doc["name"], "")
-                    sheet.write(row, col, next((a["nick"] for a in assts if a["name"]==anm), ""), f); col += 1
+                is_even = dt["date"].weekday() % 2 != 0
+                for i, s in enumerate(["早","午","晚"]):
+                    if not dt["is_curr"]:
+                        f_cell = fmts['c_gray_edge'] if i == 2 else fmts['c_gray']
+                        sheet.write(row, col, "-", f_cell)
+                    else:
+                        f_cell = [fmts['c_even_1'], fmts['c_even_2'], fmts['c_even_3']][i] if is_even else [fmts['c_odd_1'], fmts['c_odd_2'], fmts['c_odd_3']][i]
+                        k = f"{dt['str']}_{s}"
+                        anm = schedule_result.get(k, {}).get("doctors", {}).get(doc["name"], "")
+                        sheet.write(row, col, next((a["nick"] for a in assts if a["name"]==anm), ""), f_cell)
+                    col += 1
             row += 1
+            
+        # 4. 行政櫃台流動角色列
         for rnm, rk, ri in [("櫃台1","counter",0), ("櫃台2","counter",1), ("流動","floater",0), ("流動2","floater",1), ("看/行","look",0)]:
             sheet.write(row, 0, rnm, fmts['h_col']); col = 1
             for dt in w_dates:
-                f = fmts['c_wknd'] if dt.weekday() == 5 else fmts['c_norm']
-                for s in ["早","午","晚"]:
-                    lst = schedule_result.get(f"{dt}_{s}", {}).get(rk, [])
-                    sheet.write(row, col, next((a["nick"] for a in assts if a["name"]==lst[ri]), "") if ri < len(lst) else "", f); col += 1
+                is_even = dt["date"].weekday() % 2 != 0
+                for i, s in enumerate(["早","午","晚"]):
+                    if not dt["is_curr"]:
+                        f_cell = fmts['c_gray_edge'] if i == 2 else fmts['c_gray']
+                        sheet.write(row, col, "-", f_cell)
+                    else:
+                        f_cell = [fmts['c_even_1'], fmts['c_even_2'], fmts['c_even_3']][i] if is_even else [fmts['c_odd_1'], fmts['c_odd_2'], fmts['c_odd_3']][i]
+                        lst = schedule_result.get(f"{dt['str']}_{s}", {}).get(rk, [])
+                        val = next((a["nick"] for a in assts if a["name"]==lst[ri]), "") if ri < len(lst) else ""
+                        sheet.write(row, col, val, f_cell)
+                    col += 1
             row += 1
-        row += 2
+        row += 2 
+        
     writer.close(); output.seek(0); return output
-
-def get_excel_formats(workbook):
-    return {
-        'h_title': workbook.add_format({'bold': True, 'align': 'center', 'bg_color': '#D9E1F2', 'border': 1}),
-        'h_col': workbook.add_format({'bold': True, 'align': 'center', 'bg_color': '#E0E0E0', 'border': 1}),
-        'c_norm': workbook.add_format({'align': 'center', 'border': 1}),
-        'c_wknd': workbook.add_format({'align': 'center', 'border': 1, 'bg_color': '#FFF2CC'})
-    }
 
 def to_excel_individual(schedule_result, year, month, assts, docs):
     output = io.BytesIO(); writer = pd.ExcelWriter(output, engine='xlsxwriter'); workbook = writer.book
@@ -517,14 +567,23 @@ def to_excel_individual(schedule_result, year, month, assts, docs):
             elif (dt_obj.weekday(), sh) in parsed_admin.get(anm, set()):
                 act += 1
                 
-        s.write(0, 0, f"{anm} - {year}/{month}", fmts['h_title']); s.write(0, 8, f"上限: {a['custom_max'] or b_max}", fmts['c_norm']); s.write(1, 8, f"實排: {act}", fmts['c_norm'])
+        # 個人班表標題 - 擴展兩行避免吃字
+        s.merge_range(0, 0, 0, 10, f"祐德牙醫診所 {month}月班表", fmts['h_main_title'])
+        s.set_row(0, 30)
+        s.merge_range(1, 0, 1, 10, f"姓名：{anm}    (實排: {act} / 上限: {a['custom_max'] or b_max})", fmts['h_name'])
+        s.set_row(1, 25)
+        
         for i, h in enumerate(["日期","星期","早","午","晚"]):
-            s.write(2, i, h, fmts['h_col']); s.write(2, i+6, h, fmts['h_col'])
+            s.write(3, i, h, fmts['h_col']); s.write(3, i+6, h, fmts['h_col'])
+            
         mid = (len(dates)+1)//2
         for r, dt in enumerate(dates):
             col_off = 0 if r < mid else 6; row_off = r if r < mid else r - mid
-            s.write(row_off+3, col_off, f"{dt.month}/{dt.day}", fmts['c_norm'])
-            s.write(row_off+3, col_off+1, ['一','二','三','四','五','六'][dt.weekday()], fmts['c_norm'])
+            is_wknd = dt.weekday() == 5
+            f_cell = fmts['c_wknd'] if is_wknd else fmts['c_norm']
+            
+            s.write(row_off+4, col_off, f"{dt.month}/{dt.day}", f_cell)
+            s.write(row_off+4, col_off+1, ['一','二','三','四','五','六'][dt.weekday()], f_cell)
             for ci, sh in enumerate(["早","午","晚"]):
                 v = ""; data = schedule_result.get(f"{dt}_{sh}", {})
                 
@@ -536,21 +595,22 @@ def to_excel_individual(schedule_result, year, month, assts, docs):
                 else:
                     for dn, asn in data.get("doctors", {}).items():
                         if asn == anm: v = next((d["nick"] for d in docs if d["name"]==dn), dn)
-                s.write(row_off+3, col_off+2+ci, v, fmts['c_norm'])
+                s.write(row_off+4, col_off+2+ci, v, f_cell)
+                
+        # 底部加入排班註記與工時
+        last_row = mid + 6
+        notes = [
+            "註：全診及午晚班有空請輪流抽空吃飯，謹守30分鐘規定，以免影響其他助理。",
+            "1〉早午班 8:30AM~ 12:00AM 1:30PM~ 6:00PM。　2〉午晚班 1:30PM ~10:00PM。",
+            "3〉早晚班 8:00AM~ 12:00AM 6:00PM~ 10:00PM。 4〉一個早班 8:00AM~12:00AM。",
+            "5〉一個午班 2:00PM ~ 6:00PM。　6〉一個晚班 6:00PM ~10:00PM。",
+            "7〉全診〈早中晚〉8:00AM~ 12:00AM 1:30PM~ 10:00PM。"
+        ]
+        for i, note in enumerate(notes):
+            s.merge_range(last_row + i, 0, last_row + i, 11, note, fmts['note_style'])
+            
     writer.close(); output.seek(0); return output
 
-def to_excel_doctor_confirmed(manual_schedule, year, month, doc_name):
-    output = io.BytesIO(); writer = pd.ExcelWriter(output, engine='xlsxwriter'); workbook = writer.book
-    fmts = get_excel_formats(workbook); dates = generate_month_dates(year, month)
-    s = workbook.add_worksheet("確認班表")
-    s.merge_range(0, 0, 0, 4, f"{doc_name} - {year}/{month} 班表", fmts['h_title'])
-    for i, h in enumerate(["日期","星期","早","午","晚"]): s.write(2, i, h, fmts['h_col'])
-    for r, dt in enumerate(dates):
-        s.write(r+3, 0, f"{dt.month}/{dt.day}", fmts['c_norm']); s.write(r+3, 1, ['一','二','三','四','五','六'][dt.weekday()], fmts['c_norm'])
-        for ci, sh in enumerate(["早","午","晚"]):
-            is_wk = any(x for x in manual_schedule if x["Date"]==str(dt) and x["Shift"]==sh and x["Doctor"]==doc_name)
-            s.write(r+3, 2+ci, "看診" if is_wk else "", fmts['c_norm'])
-    writer.close(); output.seek(0); return output
 
 # --- UI 介面 ---
 is_locked_system = st.session_state.config.get("is_locked", False)
@@ -812,7 +872,7 @@ elif step == "7. 排班微調":
                 st.session_state.config["forced_assigns"] = {}; save_config(st.session_state.config); st.rerun()
                 
         if "本地關鍵字" in mode:
-            st.info("💡 **支援的關鍵字句型：**\n1. `XX醫師禮拜X[早上/下午/晚上/整天]給YY跟`\n2. `XX第N個星期X[早午/晚/整天]上班/休假`\n3. `XX[於]M月D日[早上/下午/晚上/整天]請假/上班`")
+            st.info("💡 **支援的關鍵字句型：**\n1. `XX醫師禮拜X[早上/下午/晚上/整天]給YY跟`\n2. `XX第N個星期X[早午/晚/整天]上班/休假`\n3. `XX[於]M月D日[星期X][早上/下午/晚上/整天]請假/上班` (例: 欣霓4/11星期六早午上班)")
             cmd = st.text_area("請輸入指令 (可換行輸入多筆)", placeholder="峻豪醫師禮拜四整天給昀霏跟\n欣霓第2個星期六早午上班\n雯萱第3個星期六休假\n燿東醫師4月10號要請假")
             if st.button("執行本地調整"):
                 if cmd:
