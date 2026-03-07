@@ -8,6 +8,7 @@ import io
 import collections
 import random
 import requests
+import time
 from datetime import datetime, date, timedelta
 
 # 嘗試匯入專業表格套件
@@ -191,7 +192,6 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         if r.get("fixed_slots"): parsed_fixed[name] = parse_slot_string(r["fixed_slots"], is_fixed=True)
         if r.get("admin_slots"): parsed_admin[name] = parse_slot_string(r["admin_slots"], is_fixed=False)
 
-    # 1. 固定診
     for slot in slots:
         dt_str, sh = slot.split("_"); wd = datetime.strptime(dt_str, "%Y-%m-%d").date().weekday()
         for name, fix_map in parsed_fixed.items():
@@ -203,7 +203,6 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         for name, admin_set in parsed_admin.items():
             if (wd, sh) in admin_set: p_counts[name] += 1; p_daily[name][dt_str].add(sh)
 
-    # 2. 自動演算
     for slot in slots:
         dt_str, sh = slot.split("_"); curr_dt = datetime.strptime(dt_str, "%Y-%m-%d").date(); wd = curr_dt.weekday()
         duty_docs = [x["Doctor"] for x in manual_schedule if x["Date"]==dt_str and x["Shift"]==sh]
@@ -243,22 +242,21 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 rule = adv_rules.get(c, {})
                 score = (p_targets[c] - p_counts[c]) * 10
                 
-                # --- 特殊邏輯：櫃檯優先級 ---
                 if r_type == "counter":
                     if asst_info.get("type") == "兼職": score += 2000 
-                    elif asst_info.get("is_main_counter"): score += 1000 # 雯萱等專職大幅提升
+                    elif asst_info.get("is_main_counter"): score += 1000 
                 
-                # --- 特殊邏輯：流動診公平分配 ---
                 if r_type == "floater":
                     if asst_info.get("is_main_counter"): score -= 800 
-                    else: score += (25 - p_floater_counts[c]) * 25 # 極大幅強化平衡
+                    else: score += (25 - p_floater_counts[c]) * 25 # 強化平衡
                     if c == "又嘉" and p_floater_counts[c] == 0: score += 500 # 又嘉流動保底
                 
-                # --- 特殊邏輯：週六強保休規則 ---
+                s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
+                if s_wl: score += (100 / max(1, len(s_wl)))
+                
                 if wd == 5:
                     has_off_sat = any(not p_daily[c][sd] for sd in sat_dates if sd != dt_str)
                     if not has_off_sat:
-                        # 如果之前週六都沒休到，且這是最後幾次，強迫休息
                         if sat_dates.index(dt_str) >= len(sat_dates) - 2: score -= 5000
                 
                 scored.append((c, score + random.random()))
@@ -269,13 +267,13 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         # 跟診
         for d_name in duty_docs:
             picked = None; targets = [pairing_matrix.get(d_name, {}).get(k) for k in ["1","2","3"]]
-            for t in [x for x in targets if x]:
+            for t in [x for x in [pairing_matrix.get(d_name, {}).get(k) for k in ["1","2","3"]] if x]:
                 if can_assign(t, "doctor"): picked = t; break
             if not picked:
                 for c in calculate_priority(cand_pool, "doctor"): picked = c; break
             if picked: slot_res["doctors"][d_name] = picked; p_counts[picked] += 1; p_daily[picked][dt_str].add(sh)
             
-        # 櫃檯 (強勢填滿 2 位)
+        # 櫃檯
         needed_ctr = ctr_count
         for c in calculate_priority(cand_pool, "counter"):
             if needed_ctr <= 0: break
@@ -289,7 +287,29 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             
     return result
 
-# --- 4. Excel 輸出 ---
+# --- 4. API 呼叫輔助函式 (含指數退避重試) ---
+def call_gemini_api(api_key, model_name, prompt):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    
+    for delay in [1, 2, 4, 8, 16]:
+        try:
+            resp = requests.post(url, json=payload, timeout=30)
+            data = resp.json()
+            if resp.status_code == 200 and 'candidates' in data:
+                return data['candidates'][0]['content']['parts'][0]['text']
+            elif resp.status_code == 429: # Rate limit
+                time.sleep(delay)
+                continue
+            else:
+                error_msg = data.get('error', {}).get('message', '未知錯誤')
+                return f"ERROR:{error_msg}"
+        except Exception as e:
+            time.sleep(delay)
+            continue
+    return "ERROR:重試次數過多，請稍後再試。"
+
+# --- 5. Excel 輸出函式 ---
 def to_excel_master(schedule_result, year, month, docs, assts):
     output = io.BytesIO(); writer = pd.ExcelWriter(output, engine='xlsxwriter'); workbook = writer.book
     fmts = get_excel_formats(workbook); sheet = workbook.add_worksheet("總班表")
@@ -502,7 +522,7 @@ elif step == "3. 進階限制":
         st.session_state.config["adv_rules"] = new_rules; save_config(st.session_state.config); st.rerun()
 
 elif step == "4. 班表生成":
-    st.header("醫師範本與初始化")
+    st.header("醫師班表範本與初始化")
     c1, c2, c3 = st.columns(3)
     y = c1.number_input("年", 2025, 2030, st.session_state.config.get("year"))
     m = c2.number_input("月", 1, 12, st.session_state.config.get("month"))
@@ -649,28 +669,27 @@ elif step == "7. 排班微調":
                 if api_key:
                     st.session_state.config["api_key"] = api_key; save_config(st.session_state.config)
                     with st.spinner("AI 解析中..."):
-                        try:
-                            # 更新為穩定 API 版與穩定模型
-                            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
-                            docs_list = get_active_doctors(); assts_list = get_active_assistants()
-                            docs_str = ",".join([d["name"] for d in docs_list]); asst_str = ",".join([a["name"] for a in assts_list])
-                            prompt = f"牙醫排班年月:{y}/{m}。醫師:{docs_str}。助理:{asst_str}。將指令轉為精確JSON格式動作清單(assign_assistant_to_doctor)。格式:[{{'doctor': 'NAME', 'assistant': 'NAME', 'weekday': 1-6, 'shift': '早/午/晚/null'}}]。指令:{cmd}"
-                            payload = {"contents": [{"parts": [{"text": prompt}]}]}
-                            resp = requests.post(url, json=payload); data = resp.json()
-                            if 'candidates' not in data: st.error(f"API 回應異常: {data.get('error', {}).get('message', '未知錯誤')}"); st.stop()
-                            raw_txt = data['candidates'][0]['content']['parts'][0]['text']
-                            clean = raw_txt.strip().replace("```json", "").replace("```", "").strip()
-                            acts = json.loads(clean); er = st.session_state.result.copy()
-                            for act in acts:
-                                for k, v in er.items():
-                                    ds, sh = k.split("_"); dt_obj = datetime.strptime(ds, "%Y-%m-%d").date()
-                                    if act.get("weekday") and (dt_obj.weekday()+1) != act["weekday"]: continue
-                                    if act.get("shift") and sh != act["shift"]: continue
-                                    if act.get("doctor") in v["doctors"]:
-                                        v["doctors"][act["doctor"]] = act["assistant"]
-                                        for key in ["counter", "floater"]: v[key] = [x if x != act["assistant"] else "" for x in v[key]]
-                            st.session_state.result = er; st.session_state["sys_msg"] = "✅ AI 已調整完成！"; st.rerun()
-                        except Exception as e: st.error(f"解析失敗: {e}")
+                        docs_list = get_active_doctors(); assts_list = get_active_assistants()
+                        docs_str = ",".join([d["name"] for d in docs_list]); asst_str = ",".join([a["name"] for a in assts_list])
+                        prompt = f"牙醫排班年月:{y}/{m}。醫師:{docs_str}。助理:{asst_str}。將指令轉為精確JSON格式動作清單(assign_assistant_to_doctor)。格式:[{{'doctor': 'NAME', 'assistant': 'NAME', 'weekday': 1-6, 'shift': '早/午/晚/null'}}]。指令:{cmd}"
+                        
+                        raw_txt = call_gemini_api(api_key, "gemini-2.0-flash", prompt)
+                        if raw_txt.startswith("ERROR:"):
+                            st.error(f"API 回應異常: {raw_txt[6:]}")
+                        else:
+                            try:
+                                clean = raw_txt.strip().replace("```json", "").replace("```", "").strip()
+                                acts = json.loads(clean); er = st.session_state.result.copy()
+                                for act in acts:
+                                    for k, v in er.items():
+                                        ds, sh = k.split("_"); dt_obj = datetime.strptime(ds, "%Y-%m-%d").date()
+                                        if act.get("weekday") and (dt_obj.weekday()+1) != act["weekday"]: continue
+                                        if act.get("shift") and sh != act["shift"]: continue
+                                        if act.get("doctor") in v["doctors"]:
+                                            v["doctors"][act["doctor"]] = act["assistant"]
+                                            for key in ["counter", "floater"]: v[key] = [x if x != act["assistant"] else "" for x in v[key]]
+                                st.session_state.result = er; st.session_state["sys_msg"] = "✅ AI 已調整完成！"; st.rerun()
+                            except Exception as e: st.error(f"解析失敗: {e}")
 
         docs = get_active_doctors(); p_weeks = get_padded_weeks(y, m); a_opts = [""] + [a["nick"] for a in assts]
         nm2n = {a["name"]: a["nick"] for a in assts}; n2nm = {a["nick"]: a["name"] for a in assts}
