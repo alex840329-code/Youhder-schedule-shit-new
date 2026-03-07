@@ -9,13 +9,6 @@ import collections
 import random
 from datetime import datetime, date, timedelta
 
-# 嘗試匯入專業表格套件
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode, GridUpdateMode
-    HAS_AGGRID = True
-except ImportError:
-    HAS_AGGRID = False
-
 # 嘗試匯入 AI 模組
 try:
     import google.generativeai as genai
@@ -24,85 +17,93 @@ except ImportError:
     HAS_AI_LIB = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v19.0 (終極完美 AgGrid 版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v18.1 (精準框線與獨立行政版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
-# --- 阻擋未安裝套件的狀態 ---
-if not HAS_AGGRID:
-    st.error("🚨 **系統升級通知：需要安裝專業表格套件！** 🚨")
-    st.markdown("""
-    為了完美呈現您要求的**「真正的雙層表頭」**、**「早中晚漸層顏色」**與**「粗細線精準分隔」**，系統已升級採用專業的 `streamlit-aggrid` 企業級套件。
-    
-    👉 **請在您的終端機 (Terminal / CMD) 執行以下指令進行安裝：**
-    """)
-    st.code("pip install streamlit-aggrid", language="bash")
-    st.warning("安裝完成後，請重新整理此網頁或重新執行程式，即可看見完美的排班表格！")
-    st.stop()
-
-# --- 注入自訂 CSS 優化 AgGrid 表頭 ---
+# --- 注入自訂 CSS 優化網格視覺、智慧漸層底色與框線 ---
 st.markdown("""
 <style>
-    /* AgGrid 標題置中與樣式 */
-    .ag-header-group-cell-label { justify-content: center !important; font-size: 15px !important; font-weight: bold !important; color: #000 !important; }
-    .ag-header-cell-label { justify-content: center !important; font-size: 13px !important; font-weight: bold !important; color: #000 !important; }
+    /* 縮小 selectbox 的高度與字體以符合表格感 */
+    div[data-baseweb="select"] > div {
+        font-size: 13px !important;
+        padding: 0px 2px !important;
+        min-height: 32px !important;
+    }
+    /* 隱藏 selectbox 下方的空白 */
+    div[data-testid="stSelectbox"] {
+        margin-bottom: -15px !important;
+    }
+    /* 讓 checkbox 置中對齊 */
+    div[data-testid="stCheckbox"] {
+        display: flex;
+        justify-content: center;
+        margin-bottom: -10px !important;
+    }
+    /* 微調欄位間距，設定 relative，並移除預設 padding 以便畫線 */
+    div[data-testid="column"] {
+        padding: 0 !important;
+        position: relative;
+        z-index: 0;
+    }
+    /* 自訂表頭外觀 */
+    .header-tier1 {
+        text-align: center; 
+        font-weight: bold; 
+        border-top: 1px solid #d3d3d3;
+        border-bottom: 1px solid #d3d3d3;
+        border-left: 2px solid #333; /* 星期左側粗線 */
+        border-right: 2px solid #333; /* 星期右側粗線 */
+        padding: 6px; 
+        margin-bottom: 4px;
+        box-sizing: border-box;
+    }
+    .header-tier2 {
+        text-align: center; 
+        font-weight: bold; 
+        border-top: 1px solid #d3d3d3;
+        border-bottom: 1px solid #d3d3d3;
+        padding: 4px; 
+        font-size: 13px;
+        box-sizing: border-box;
+    }
+    /* 早中晚的左右細線 */
+    .border-left-thin { border-left: 1px solid #d3d3d3; }
+    .border-right-thin { border-right: 1px solid #d3d3d3; }
+    /* 星期的左右粗線 */
+    .border-left-thick { border-left: 2px solid #333; }
+    .border-right-thick { border-right: 2px solid #333; }
     
-    /* 標題列背景顏色與粗線 (還原 Excel 視覺) */
-    .header-odd { background-color: #FFD966 !important; border-right: 2px solid #333 !important; border-bottom: 1px solid #333 !important;}
-    .header-even { background-color: #9DC3E6 !important; border-right: 2px solid #333 !important; border-bottom: 1px solid #333 !important;}
-    .header-disabled { background-color: #e0e0e0 !important; border-right: 2px solid #333 !important; }
+    .name-col {
+        padding-top: 10px; 
+        padding-left: 10px;
+        font-weight: bold; 
+        font-size: 14px; 
+        color: #333;
+        border-right: 2px solid #333; /* 人員欄位右側粗線 */
+        height: 100%;
+        box-sizing: border-box;
+    }
     
-    /* 確保打勾框置中 */
-    .ag-cell-wrapper { display: flex; justify-content: center; align-items: center; height: 100%; width: 100%; }
+    /* 填滿整個 Column 的背景色區塊與框線 */
+    .bg-fill {
+        position: absolute;
+        top: 0; left: 0; width: 100%; height: 100%;
+        z-index: -1;
+        pointer-events: none; /* 點擊穿透 */
+        box-sizing: border-box;
+    }
+    /* 確保元件浮在背景之上 */
+    div[data-testid="stCheckbox"] > label, div[data-testid="stSelectbox"] > label {
+        position: relative;
+        z-index: 1;
+        padding: 0 5px; /* 加回一點 padding 避免文字貼邊 */
+    }
+    /* 隱藏外層容器的 gap 以便框線密合 */
+    div[data-testid="stHorizontalBlock"] {
+        gap: 0 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
-
-# --- AgGrid JS 色彩漸層渲染器 (精準重現截圖顏色) ---
-cell_style_js = JsCode("""
-function(params) {
-    var shift = params.colDef.headerName;
-    var cellClass = params.colDef.cellClass || '';
-    var isOdd = cellClass === 'is_odd';
-    var val = params.value;
-    
-    var style = { 
-        'textAlign': 'center', 
-        'borderRight': '1px solid #d3d3d3',
-        'borderBottom': '1px solid #d3d3d3',
-        'color': '#000',
-        'fontWeight': 'bold',
-        'display': 'flex',
-        'alignItems': 'center',
-        'justifyContent': 'center'
-    };
-    
-    // 星期之間的粗黑線
-    if (shift === '晚') {
-        style['borderRight'] = '2px solid #333'; 
-    }
-    
-    // 跨月的反黑無效區
-    if (val === '-' || val === '⬛') {
-        style['backgroundColor'] = '#f0f0f0';
-        style['color'] = '#ccc';
-        return style;
-    }
-    
-    // 單數日漸層 (橘黃暖色)
-    if (isOdd) {
-        if (shift === '早') style['backgroundColor'] = '#FDE9D9';
-        if (shift === '午') style['backgroundColor'] = '#FCD5B4';
-        if (shift === '晚') style['backgroundColor'] = '#FABF8F';
-    } 
-    // 偶數日漸層 (藍冷色)
-    else {
-        if (shift === '早') style['backgroundColor'] = '#DDEBF7';
-        if (shift === '午') style['backgroundColor'] = '#BDD7EE';
-        if (shift === '晚') style['backgroundColor'] = '#9DC3E6';
-    }
-    
-    return style;
-}
-""")
 
 # --- 全域成功提示系統 ---
 if "sys_msg" in st.session_state:
@@ -180,25 +181,35 @@ def load_config():
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+                
+                # 自動補齊舊版 JSON 缺少的頂層欄位
                 for k, v in defaults.items():
-                    if k not in data: data[k] = v
+                    if k not in data:
+                        data[k] = v
+                        
+                # 確保舊版本助理內部屬性補齊新欄位
                 if "assistants_struct" in data:
                     for a in data["assistants_struct"]:
                         if "pref" not in a: a["pref"] = "normal"
                         if "type" not in a: a["type"] = "全職"
                         if "is_main_counter" not in a: a["is_main_counter"] = False
+                
+                # 確保進階規則有 admin_slots 欄位
                 if "adv_rules" in data:
                     for k, v in data["adv_rules"].items():
-                        if "admin_slots" not in v: v["admin_slots"] = ""
+                        if "admin_slots" not in v:
+                            v["admin_slots"] = ""
                 return data
-        except Exception: return defaults
+        except Exception as e:
+            return defaults
     return defaults
 
 def save_config(config):
     try:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config, f, ensure_ascii=False, indent=4)
-    except Exception as e: st.error(f"存檔發生錯誤: {e}")
+    except Exception as e:
+        st.error(f"存檔發生錯誤: {e}")
 
 if 'config' not in st.session_state:
     st.session_state.config = load_config()
@@ -213,22 +224,33 @@ def get_active_assistants():
 
 def generate_month_dates(year, month):
     num_days = calendar.monthrange(year, month)[1]
-    return [date(year, month, d) for d in range(1, num_days + 1) if date(year, month, d).weekday() != 6]
+    dates = []
+    for d in range(1, num_days + 1):
+        dt = date(year, month, d)
+        if dt.weekday() == 6: continue # 排除星期日
+        dates.append(dt)
+    return dates
 
 def get_padded_weeks(year, month):
+    """產生包含跨月黑方塊的完整週一至週六結構"""
     first_day = date(year, month, 1)
     last_day = date(year, month, calendar.monthrange(year, month)[1])
+    
     start_date = first_day - timedelta(days=first_day.weekday()) 
-    weeks = []; current_date = start_date
+    weeks = []
+    current_date = start_date
+    
     while current_date <= last_day or current_date.weekday() != 0:
         if current_date > last_day and current_date.weekday() == 0: break
         week_dates = []
         for _ in range(7):
-            if current_date.weekday() != 6:
+            if current_date.weekday() != 6: # 排除週日
                 is_curr_month = (current_date.month == month)
                 week_dates.append({
-                    "date": current_date, "is_curr": is_curr_month, "str": str(current_date),
-                    "disp": f"{current_date.month}/{current_date.day}({['一','二','三','四','五','六'][current_date.weekday()]})" if is_curr_month else f"⬛ {current_date.month}/{current_date.day}"
+                    "date": current_date,
+                    "is_curr": is_curr_month,
+                    "str": str(current_date),
+                    "disp": f"{current_date.month}/{current_date.day} ({['一','二','三','四','五','六'][current_date.weekday()]})" if is_curr_month else f"⬛ {current_date.month}/{current_date.day}"
                 })
             current_date += timedelta(days=1)
         weeks.append(week_dates)
@@ -237,12 +259,13 @@ def get_padded_weeks(year, month):
 def calculate_shift_limits(year, month):
     dates = generate_month_dates(year, month)
     max_s = len(dates) * 2
-    return max_s - 8, max_s
+    min_s = max_s - 8
+    return min_s, max_s
 
 def parse_slot_string(text, is_fixed=False):
     wd_map = {"一":0, "二":1, "三":2, "四":3, "五":4, "六":5}
     shift_map = {"早":"早", "午":"午", "晚":"晚"}
-    role_map = {"櫃":"counter", "流":"floater", "看":"look", "跟":"doctor", "行":"look"} 
+    role_map = {"櫃":"counter", "流":"floater", "看":"look", "跟":"doctor", "行":"look"} # 舊有的固定班轉換，行政轉為look
     if not text: return {} if is_fixed else set()
     items = [x.strip() for x in text.replace("、", ",").split(",") if x.strip()]
     if is_fixed:
@@ -260,7 +283,7 @@ def parse_slot_string(text, is_fixed=False):
             if wd is not None and sh is not None: res.add((wd, sh))
         return res
 
-# --- 3. 核心排班演算法 ---
+# --- 3. 核心排班演算法 (加入防勞與天地班防禦) ---
 def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_count, flt_count):
     assts = get_active_assistants()
     docs = get_active_doctors()
@@ -299,6 +322,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         if r.get("fixed_slots"): parsed_fixed[name] = parse_slot_string(r["fixed_slots"], is_fixed=True)
         if r.get("admin_slots"): parsed_admin[name] = parse_slot_string(r["admin_slots"], is_fixed=False)
 
+    # 1. 優先填入絕對固定班
     for slot in slots:
         dt_str, sh = slot.split("_")
         wd = datetime.strptime(dt_str, "%Y-%m-%d").date().weekday()
@@ -312,11 +336,17 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                     p_counts[name] += 1
                     p_daily[name][dt_str].add(sh)
                     
+        # 處理獨立的行政診
         for name, admin_set in parsed_admin.items():
             if (wd, sh) in admin_set:
+                # 假設行政診也算作排班，但不佔用看診/櫃台/流動的扣打（依實際需求可調整，這裡先不排入 result，只阻擋）
+                # 這裡設計為：如果有行政診，就不要排其他工作，因此先記上一筆
                 p_counts[name] += 1
                 p_daily[name][dt_str].add(sh)
+                # 可選：在 result 裡標記他在行政，這裡用 look 暫代或獨立一個 admin 列表
+                # result[slot]["look"].append(f"{name}(行)")
 
+    # 2. 自動演算填補
     for slot in slots:
         dt_str, sh = slot.split("_")
         curr_dt = datetime.strptime(dt_str, "%Y-%m-%d").date()
@@ -328,6 +358,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         slot_res = result[slot]
         
         def assigned_in_slot(name):
+            # 檢查是否已安排其他工作，包含行政診
             is_admin = (wd, sh) in parsed_admin.get(name, set())
             return name in slot_res["counter"] or name in slot_res["floater"] or name in slot_res["look"] or name in slot_res["doctors"].values() or is_admin
 
@@ -339,6 +370,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             rule = adv_rules.get(name, {})
             r_lim = rule.get("role_limit", "無限制")
             
+            # 精準角色判斷
             if r_lim == "僅櫃台" and role != "counter": return False
             if r_lim == "僅流動" and role != "floater": return False
             if r_lim == "僅跟診" and role != "doctor": return False
@@ -350,15 +382,20 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             
             s_wl_str = rule.get("slot_whitelist", "")
             if s_wl_str:
-                if (wd, sh) not in parse_slot_string(s_wl_str, is_fixed=False): return False
+                s_wl = parse_slot_string(s_wl_str, is_fixed=False)
+                if (wd, sh) not in s_wl: return False
 
             avoid_str = rule.get("avoid", "")
             if avoid_str:
-                for av in [x.strip() for x in avoid_str.split(",") if x.strip()]:
+                avoids = [x.strip() for x in avoid_str.split(",")]
+                for av in avoids:
                     if assigned_in_slot(av): return False 
 
+            # ★ 防護機制：天地班防禦 (早+晚，無午)
             today_shifts = p_daily[name][dt_str]
             if sh == "晚" and "早" in today_shifts and "午" not in today_shifts: return False 
+            
+            # ★ 防護機制：連三防禦 (不可跨日連續三診滿班)
             if sh == "晚" and "早" in today_shifts and "午" in today_shifts:
                 yesterday_str = str(curr_dt - timedelta(days=1))
                 if len(p_daily[name].get(yesterday_str, set())) == 3: return False 
@@ -368,25 +405,27 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         def calculate_priority(candidates, curr_wd, curr_sh, curr_dt_str):
             scored = []
             for c in candidates:
-                if not can_assign(c, "floater"): continue 
+                if not can_assign(c, "floater"): continue # 快篩
                 
                 gap = p_targets[c] - p_counts[c]
-                score = gap * 10 + random.random() * 2 
+                score = gap * 10 + random.random() * 2 # 權重放大
                 
+                # ★ 週六完美邏輯權重調整
                 if curr_wd == 5:
                     is_ft = next((a["type"] == "全職" for a in assts if a["name"] == c), False)
                     if is_ft:
                         sat_dates = [str(dt) for dt in dates if dt.weekday() == 5]
                         sats_worked = sum(1 for d in sat_dates if p_daily[c][d])
                         sat_nights = sum(1 for d in sat_dates if "晚" in p_daily[c][d])
+                        
                         working_today = bool(p_daily[c][curr_dt_str])
                         
                         if curr_sh == "晚":
-                            if sat_nights >= 2: score -= 1000 
-                            elif sat_nights < 2: score += 50  
+                            if sat_nights >= 2: score -= 1000 # 嚴格禁止超過兩個晚班
+                            elif sat_nights < 2: score += 50  # 鼓勵補滿兩個晚班
                         else:
                             if not working_today and sats_worked >= total_sats - 1:
-                                score -= 1000 
+                                score -= 1000 # 必須保留一天全休日
                                 
                 scored.append((c, score))
             scored.sort(key=lambda x: x[1], reverse=True)
@@ -394,6 +433,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
 
         candidates_pool = [a["name"] for a in assts]
         
+        # 安排跟診
         for doc_name in duty_docs:
             if doc_name in slot_res["doctors"] and slot_res["doctors"][doc_name]: continue 
             picked = None
@@ -413,6 +453,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 p_daily[picked][dt_str].add(sh)
             else: slot_res["doctors"][doc_name] = ""
 
+        # 安排櫃台 (確保含主櫃台)
         needed_ctr = ctr_count - len(slot_res["counter"])
         if needed_ctr > 0:
             has_main = any(c in main_counters for c in slot_res["counter"])
@@ -432,6 +473,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                     p_daily[c][dt_str].add(sh)
                     needed_ctr -= 1
         
+        # 安排流動
         needed_flt = flt_count - len(slot_res["floater"])
         if needed_flt > 0:
             for c in calculate_priority(candidates_pool, wd, sh, dt_str):
@@ -446,7 +488,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
 
     return result, p_counts, std_min, std_max
 
-# --- 4. Excel 輸出 ---
+# --- 4. Excel 輸出 (美化版) ---
 def get_excel_formats(workbook):
     return {
         'h_title': workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'font_size': 14, 'bg_color': '#D9E1F2', 'border': 1}),
@@ -520,7 +562,7 @@ def to_excel_master(schedule_result, year, month, docs, assts):
                             if not v: v = nm
                     sheet.write(current_row, col, v, fmt); col += 1
             current_row += 1
-        current_row += 2 
+        current_row += 2 # 空行分隔週次
         
     writer.close()
     output.seek(0)
@@ -576,7 +618,7 @@ def to_excel_individual(schedule_result, year, month, assts, docs):
     return output
 
 # --- 7. UI 介面 ---
-st.title("🦷 祐德牙醫 - 智慧排班系統 v19.0 (真・雙層AgGrid版)")
+st.title("🦷 祐德牙醫 - 智慧排班系統 v18.1 (獨立行政與細緻框線版)")
 
 is_locked_system = st.session_state.config.get("is_locked", False)
 
@@ -675,6 +717,7 @@ elif step == "3. 助理進階限制":
         with c5.popover(f"📅 白名單 ({len(wl_set)})"):
             st.markdown("**勾選允許排班的時段 (若全空則代表無限制)**")
             days_map = {0:"一", 1:"二", 2:"三", 3:"四", 4:"五", 5:"六"}
+            
             gc_h = st.columns([1,1,1,1])
             gc_h[0].write(""); gc_h[1].write("**早**"); gc_h[2].write("**午**"); gc_h[3].write("**晚**")
             
@@ -684,6 +727,7 @@ elif step == "3. 助理進階限制":
                 m_val = gc[1].checkbox("", value=(wd, "早") in wl_set, key=f"wl_{nm}_{wd}_早")
                 a_val = gc[2].checkbox("", value=(wd, "午") in wl_set, key=f"wl_{nm}_{wd}_午")
                 e_val = gc[3].checkbox("", value=(wd, "晚") in wl_set, key=f"wl_{nm}_{wd}_晚")
+                
                 if m_val: wl_grid_vals.append(f"{days_map[wd]}早")
                 if a_val: wl_grid_vals.append(f"{days_map[wd]}午")
                 if e_val: wl_grid_vals.append(f"{days_map[wd]}晚")
@@ -695,26 +739,34 @@ elif step == "3. 助理進階限制":
         
         with c6.popover(f"💼 行政診 ({len(admin_set)})"):
             st.markdown("**勾選固定行政診時段 (排班將避開)**")
+            days_map = {0:"一", 1:"二", 2:"三", 3:"四", 4:"五", 5:"六"}
+            
             agc_h = st.columns([1,1,1,1])
             agc_h[0].write(""); agc_h[1].write("**早**"); agc_h[2].write("**午**"); agc_h[3].write("**晚**")
+            
             for wd in range(6):
                 agc = st.columns([1,1,1,1])
                 agc[0].markdown(f"<div style='padding-top:8px;'>星期{days_map[wd]}</div>", unsafe_allow_html=True)
                 am_val = agc[1].checkbox("", value=(wd, "早") in admin_set, key=f"admin_{nm}_{wd}_早")
                 aa_val = agc[2].checkbox("", value=(wd, "午") in admin_set, key=f"admin_{nm}_{wd}_午")
                 ae_val = agc[3].checkbox("", value=(wd, "晚") in admin_set, key=f"admin_{nm}_{wd}_晚")
+                
                 if am_val: admin_grid_vals.append(f"{days_map[wd]}早")
                 if aa_val: admin_grid_vals.append(f"{days_map[wd]}午")
                 if ae_val: admin_grid_vals.append(f"{days_map[wd]}晚")
                 
         new_rules[nm] = {
-            "role_limit": role_val, "shift_limit": shift_val, "avoid": ",".join(avoid_val),
-            "slot_whitelist": ",".join(wl_grid_vals), "admin_slots": ",".join(admin_grid_vals),
+            "role_limit": role_val,
+            "shift_limit": shift_val,
+            "avoid": ",".join(avoid_val),
+            "slot_whitelist": ",".join(wl_grid_vals),
+            "admin_slots": ",".join(admin_grid_vals),
             "fixed_slots": r.get("fixed_slots", "")
         }
         st.markdown("<hr style='margin:0 0 10px 0; border-color:#f0f2f6;'>", unsafe_allow_html=True)
         
     if st.button("💾 儲存進階限制", type="primary"):
+        # 雙向同步「避開人員」邏輯
         for nm, rules in new_rules.items():
             avoids = [x.strip() for x in rules["avoid"].split(",") if x.strip()]
             for target in avoids:
@@ -723,65 +775,93 @@ elif step == "3. 助理進階限制":
                     if nm not in target_avoids:
                         target_avoids.append(nm)
                         new_rules[target]["avoid"] = ",".join(target_avoids)
-        st.session_state.config["adv_rules"] = new_rules; save_config(st.session_state.config); st.session_state["sys_msg"] = "✅ 進階限制儲存成功！(避開人員已自動雙向同步)"; st.rerun()
+                        
+        st.session_state.config["adv_rules"] = new_rules
+        save_config(st.session_state.config)
+        st.session_state["sys_msg"] = "✅ 進階限制儲存成功！(避開人員已自動雙向同步)"
+        st.rerun()
 
 elif step == "4. 醫師範本與生成":
     st.header("醫師班表範本與初始化")
-    st.info("💡 為了 100% 重現您的截圖，我們導入了專業的 **AgGrid** 引擎！完美的雙層表頭、漸層底色與粗黑線一次到位。直接點擊格子即可打勾/取消。")
+    st.info("💡 已加入細緻的內外框線，整行皆有背景底色方便辨識。")
     
     doc_names = [d["name"] for d in get_active_doctors()]
     days = ["一", "二", "三", "四", "五", "六"]
+    shifts = ["早", "午", "晚"]
     
-    def render_template_aggrid(key):
+    # 決定第一層和第二層的寬度比例
+    outer_weights = [1.5] + [3] * 6
+    
+    def render_template_ui(key):
         data = st.session_state.config.get(key, {})
-        rows = []
-        for doc in doc_names:
-            row = {"doctor": f"👨‍⚕️ {doc}"}
-            sched = data.get(doc, [False]*18)
-            for i, d in enumerate(days):
-                for s_idx, s in enumerate(["早", "午", "晚"]):
-                    row[f"星期{d}_{s}"] = bool(sched[i*3 + s_idx]) if len(sched)==18 else False
-            rows.append(row)
-        df = pd.DataFrame(rows)
+        new_data = {}
         
-        col_defs = [{"headerName": "醫師", "field": "doctor", "pinned": "left", "width": 140, "cellStyle": {"fontWeight": "bold", "borderRight": "2px solid #333", "backgroundColor": "#fff"}}]
-        
+        # 繪製 Tier 1 (第一層表頭：星期)
+        hc1 = st.columns(outer_weights)
+        hc1[0].markdown("<div class='name-col'>醫師</div>", unsafe_allow_html=True)
         for i, d in enumerate(days):
-            is_odd = (i % 2 == 0)
-            children = []
-            for s in ["早", "午", "晚"]:
-                children.append({
-                    "headerName": s, "field": f"星期{d}_{s}", "editable": True,
-                    "cellEditor": "agCheckboxCellEditor", "cellRenderer": "agCheckboxCellRenderer",
-                    "cellClass": "is_odd" if is_odd else "is_even", "cellStyle": cell_style_js, "width": 70
-                })
-            col_defs.append({
-                "headerName": f"星期{d}", "children": children, "headerClass": "header-odd" if is_odd else "header-even"
-            })
+            is_odd = (i % 2 == 0) # 0=Mon(Odd), 1=Tue(Even)...
+            bg_t1 = "#FFD966" if is_odd else "#9DC3E6"
+            hc1[i+1].markdown(f"<div class='header-tier1' style='background-color:{bg_t1};'>星期{d}</div>", unsafe_allow_html=True)
             
-        go = {"columnDefs": col_defs, "defaultColDef": {"suppressMovable": True}, "rowHeight": 45, "headerHeight": 40}
-        res = AgGrid(df, gridOptions=go, allow_unsafe_jscode=True, fit_columns_on_grid_load=False, update_mode=GridUpdateMode.MODEL_CHANGED, theme="alpine", key=f"ag_{key}")
-        return res['data']
+        # 繪製 Tier 2 (第二層表頭：早午晚)
+        hc2 = st.columns(outer_weights)
+        hc2[0].markdown("<div class='name-col'></div>", unsafe_allow_html=True)
+        for i in range(6):
+            is_odd = (i % 2 == 0)
+            bg_morn = "#FFF9C4" if is_odd else "#E6F0FA"
+            bg_aft  = "#FFF2CC" if is_odd else "#CCE0F5"
+            bg_eve  = "#FFE699" if is_odd else "#B3D1F0"
+            
+            inner = hc2[i+1].columns(3)
+            inner[0].markdown(f"<div class='header-tier2 border-left-thick border-right-thin' style='background-color:{bg_morn};'>早</div>", unsafe_allow_html=True)
+            inner[1].markdown(f"<div class='header-tier2 border-right-thin' style='background-color:{bg_aft};'>午</div>", unsafe_allow_html=True)
+            inner[2].markdown(f"<div class='header-tier2 border-right-thick' style='background-color:{bg_eve};'>晚</div>", unsafe_allow_html=True)
+            
+        # 移除水平分隔線，改由 CSS 控制
+        
+        # 繪製 資料列
+        for doc in doc_names:
+            rc = st.columns(outer_weights)
+            rc[0].markdown(f"<div class='name-col' style='border-top:1px solid #d3d3d3; border-bottom:1px solid #d3d3d3;'>{doc}</div>", unsafe_allow_html=True)
+            
+            sched = data.get(doc, [False]*18)
+            doc_sched = []
+            
+            for i in range(6):
+                is_odd = (i % 2 == 0)
+                bg_morn = "#FFF9C4" if is_odd else "#E6F0FA"
+                bg_aft  = "#FFF2CC" if is_odd else "#CCE0F5"
+                bg_eve  = "#FFE699" if is_odd else "#B3D1F0"
+                
+                inner = rc[i+1].columns(3)
+                
+                # 注入背景標籤並加上框線，與內建 checkbox
+                inner[0].markdown(f"<div class='bg-fill border-left-thick border-right-thin' style='background-color:{bg_morn}; border-top:1px solid #d3d3d3; border-bottom:1px solid #d3d3d3;'></div>", unsafe_allow_html=True)
+                v1 = inner[0].checkbox("", value=bool(sched[i*3]) if len(sched)==18 else False, key=f"{key}_{doc}_{i}_0", label_visibility="collapsed")
+                
+                inner[1].markdown(f"<div class='bg-fill border-right-thin' style='background-color:{bg_aft}; border-top:1px solid #d3d3d3; border-bottom:1px solid #d3d3d3;'></div>", unsafe_allow_html=True)
+                v2 = inner[1].checkbox("", value=bool(sched[i*3+1]) if len(sched)==18 else False, key=f"{key}_{doc}_{i}_1", label_visibility="collapsed")
+                
+                inner[2].markdown(f"<div class='bg-fill border-right-thick' style='background-color:{bg_eve}; border-top:1px solid #d3d3d3; border-bottom:1px solid #d3d3d3;'></div>", unsafe_allow_html=True)
+                v3 = inner[2].checkbox("", value=bool(sched[i*3+2]) if len(sched)==18 else False, key=f"{key}_{doc}_{i}_2", label_visibility="collapsed")
+                
+                doc_sched.extend([v1, v2, v3])
+                
+            new_data[doc] = doc_sched
+            
+        return new_data
 
     t1, t2 = st.tabs(["單週範本", "雙週範本"])
-    with t1: odd_data = render_template_aggrid("template_odd")
-    with t2: even_data = render_template_aggrid("template_even")
+    with t1: new_odd = render_template_ui("template_odd")
+    with t2: new_even = render_template_ui("template_even")
     
     if st.button("💾 存範本", type="primary"):
-        def save_ag(grid_data, config_key):
-            res = {}
-            if grid_data is not None and len(grid_data) > 0:
-                if isinstance(grid_data, pd.DataFrame): records = grid_data.to_dict('records')
-                else: records = grid_data
-                for row in records:
-                    doc_clean = row["doctor"].replace("👨‍⚕️ ", "")
-                    vals = []
-                    for d in days:
-                        for s in ["早", "午", "晚"]: vals.append(bool(row[f"星期{d}_{s}"]))
-                    res[doc_clean] = vals
-                st.session_state.config[config_key] = res
-        save_ag(odd_data, "template_odd"); save_ag(even_data, "template_even"); save_config(st.session_state.config)
-        st.session_state["sys_msg"] = "✅ 雙/單週範本儲存成功！"; st.rerun()
+        st.session_state.config["template_odd"] = new_odd
+        st.session_state.config["template_even"] = new_even
+        save_config(st.session_state.config)
+        st.session_state["sys_msg"] = "✅ 雙/單週範本儲存成功！"
+        st.rerun()
         
     st.divider()
     st.subheader("生成本月初始班表")
@@ -814,7 +894,8 @@ elif step == "4. 醫師範本與生成":
                             generated.append({"Date": str(dt), "Shift": s, "Doctor": dn})
                             
         st.session_state.config["manual_schedule"] = generated; save_config(st.session_state.config)
-        st.session_state["sys_msg"] = f"✅ 初始班表生成完畢！畫面第 1 週已精準套用【{first_week_setting}】範本。"; st.rerun()
+        st.session_state["sys_msg"] = f"✅ 初始班表生成完畢！畫面第 1 週已精準套用【{first_week_setting}】範本。"
+        st.rerun()
 
 elif step == "5. 👨‍⚕️ 醫師專屬入口":
     st.header("👨‍⚕️ 醫師個人班表確認與修改")
@@ -847,10 +928,11 @@ elif step == "5. 👨‍⚕️ 醫師專屬入口":
                     if d_info["is_curr"]:
                         row[c] = any(x for x in manual if x["Date"] == d_info["str"] and x["Shift"] == s and x["Doctor"] == selected_doc)
                     else:
-                        row[c] = False
+                        row[c] = False # 非當月預設為 False
                 rows.append(row)
 
             df = pd.DataFrame(rows).set_index("時段")
+            # 鎖定非當月日期
             cfg = {c: st.column_config.CheckboxColumn(c, disabled=(not w_dates[i]["is_curr"])) for i, c in enumerate(cols)}
             edited_dfs[w_idx] = st.data_editor(df, column_config=cfg, key=f"doc_wk_{w_idx}", use_container_width=True, disabled=is_locked_system)
         
@@ -864,9 +946,12 @@ elif step == "5. 👨‍⚕️ 醫師專屬入口":
             st.session_state.config["manual_schedule"] = new_manual
             save_config(st.session_state.config)
             
+            # 清除步驟7的暫存，強迫重新跑演算法
             if 'result' in st.session_state: del st.session_state['result']
             st.session_state["sys_msg"] = f"✅ {selected_doc} 班表已儲存！(請至步驟 7 重新執行排班套用最新假單)"
             st.rerun()
+    else:
+        st.warning("⚠️ 系統內尚未設定任何醫師，請先至「系統與人員設定」新增醫師。")
 
 elif step == "6. 👩‍⚕️ 助理專屬入口":
     st.header("👩‍⚕️ 助理個人休假登記")
@@ -916,9 +1001,12 @@ elif step == "6. 👩‍⚕️ 助理專屬入口":
             st.session_state.config["leaves"] = new_leaves
             save_config(st.session_state.config)
             
+            # 清除步驟7的暫存，強迫重新跑演算法
             if 'result' in st.session_state: del st.session_state['result']
             st.session_state["sys_msg"] = f"✅ {selected_asst} 休假已儲存！(請至步驟 7 重新執行排班套用最新假單)"
             st.rerun()
+    else:
+        st.warning("⚠️ 系統內尚未設定任何助理，請先至「系統與人員設定」新增助理。")
 
 elif step == "7. 排班與總管微調":
     st.header("智慧排班與微調面板")
@@ -936,7 +1024,7 @@ elif step == "7. 排班與總管微調":
     
     if 'result' in st.session_state:
         st.divider()
-        st.info("💡 已使用企業級 AgGrid 表格渲染！雙擊儲存格或直接輸入文字即可修改，修改後請記得點擊下方「儲存並更新數據」。")
+        st.info("💡 已加入細緻的內外框線，整行皆有背景底色方便辨識。")
         
         y = st.session_state.config.get("year", datetime.today().year)
         m = st.session_state.config.get("month", datetime.today().month % 12 + 1)
@@ -948,83 +1036,120 @@ elif step == "7. 排班與總管微調":
         
         edited_res = st.session_state.result.copy()
         
+        # 建立 Form 以便一次性送出修改
         with st.form("schedule_adjust_form"):
-            st.subheader("📝 班表微調區 (AgGrid 雙層表頭版)")
+            st.subheader("📝 班表微調區")
             
             for w_idx, w_dates in enumerate(padded_weeks):
                 st.markdown(f"#### 第 {w_idx+1} 週")
                 
-                rows = []
-                # 加入醫師列
-                for doc in docs:
-                    row = {"person": f"👨‍⚕️ {doc['nick']}", "type": "doc", "name": doc["name"]}
-                    for d_info in w_dates:
-                        for s in ["早", "午", "晚"]:
-                            f = f"{d_info['str']}_{s}"
-                            if d_info["is_curr"]: row[f] = nm2n.get(edited_res.get(f, {}).get("doctors", {}).get(doc["name"], ""), "")
-                            else: row[f] = "-" 
-                    rows.append(row)
+                num_days = len(w_dates)
+                outer_weights = [1.5] + [3] * num_days
                 
-                # 加入職位列
+                # 繪製 Tier 1 (第一層表頭：日期)
+                hc1 = st.columns(outer_weights)
+                hc1[0].markdown("<div class='name-col'>人員</div>", unsafe_allow_html=True)
+                
+                # 繪製 Tier 2 (第二層表頭：早午晚) 必須同時跟著建構
+                hc2 = st.columns(outer_weights)
+                hc2[0].markdown("<div class='name-col'></div>", unsafe_allow_html=True)
+                
+                for i, d_info in enumerate(w_dates):
+                    is_odd = (d_info["date"].weekday() % 2 == 0) # 0=Mon(Odd), 1=Tue(Even)...
+                    
+                    if d_info["is_curr"]:
+                        bg_t1 = "#FFD966" if is_odd else "#9DC3E6"
+                        bg_morn = "#FFF9C4" if is_odd else "#E6F0FA"
+                        bg_aft  = "#FFF2CC" if is_odd else "#CCE0F5"
+                        bg_eve  = "#FFE699" if is_odd else "#B3D1F0"
+                    else:
+                        bg_t1 = "#e0e0e0"
+                        bg_morn = bg_aft = bg_eve = "#f0f0f0"
+                        
+                    hc1[i+1].markdown(f"<div class='header-tier1' style='background-color:{bg_t1};'>{d_info['disp']}</div>", unsafe_allow_html=True)
+                    
+                    sc = hc2[i+1].columns(3)
+                    sc[0].markdown(f"<div class='header-tier2 border-left-thick border-right-thin' style='background-color:{bg_morn};'>早</div>", unsafe_allow_html=True)
+                    sc[1].markdown(f"<div class='header-tier2 border-right-thin' style='background-color:{bg_aft};'>午</div>", unsafe_allow_html=True)
+                    sc[2].markdown(f"<div class='header-tier2 border-right-thick' style='background-color:{bg_eve};'>晚</div>", unsafe_allow_html=True)
+                    
+                
+                # 準備資料列結構
                 r_defs = [("櫃1", "counter", 0), ("櫃2", "counter", 1), ("流", "floater", 0), ("看", "look", 0)]
+                all_rows = [{"name": doc["name"], "label": f"👨‍⚕️{doc['nick']}", "type": "doc"} for doc in docs]
                 for rn, rk, ri in r_defs:
-                    row = {"person": rn, "type": "role", "key": rk, "idx": ri}
-                    for d_info in w_dates:
-                        for s in ["早", "午", "晚"]:
-                            f = f"{d_info['str']}_{s}"
-                            if d_info["is_curr"]:
-                                lst = edited_res.get(f, {}).get(rk, [])
-                                row[f] = nm2n.get(lst[ri], "") if ri < len(lst) else ""
-                            else: row[f] = "-"
-                    rows.append(row)
+                    all_rows.append({"name": rn, "label": rn, "type": "role", "key": rk, "idx": ri})
+                
+                # 繪製 每一個列
+                for row_data in all_rows:
+                    rc = st.columns(outer_weights)
+                    rc[0].markdown(f"<div class='name-col' style='border-top:1px solid #d3d3d3; border-bottom:1px solid #d3d3d3;'>{row_data['label']}</div>", unsafe_allow_html=True)
                     
-                df = pd.DataFrame(rows)
-                
-                col_defs = [{"headerName": "人員", "field": "person", "pinned": "left", "width": 120, "editable": False, "cellStyle": {"fontWeight": "bold", "borderRight": "2px solid #333", "backgroundColor": "#fff"}}]
-                
-                for d_info in w_dates:
-                    is_odd = (d_info["date"].weekday() % 2 == 0)
-                    h_class = "header-disabled"
-                    if d_info["is_curr"]: h_class = "header-odd" if is_odd else "header-even"
+                    for col_idx, d_info in enumerate(w_dates):
+                        is_odd = (d_info["date"].weekday() % 2 == 0)
+                        bg_morn = "#FFF9C4" if is_odd else "#E6F0FA"
+                        bg_aft  = "#FFF2CC" if is_odd else "#CCE0F5"
+                        bg_eve  = "#FFE699" if is_odd else "#B3D1F0"
                         
-                    children = []
-                    for s in ["早", "午", "晚"]:
-                        f = f"{d_info['str']}_{s}"
-                        children.append({
-                            "headerName": s, "field": f, "editable": d_info["is_curr"],
-                            "cellEditor": "agSelectCellEditor", "cellEditorParams": {"values": asst_opts},
-                            "cellClass": "is_odd" if is_odd else "is_even", "cellStyle": cell_style_js, "width": 70
-                        })
-                    col_defs.append({"headerName": d_info["disp"], "children": children, "headerClass": h_class})
-                    
-                go = {"columnDefs": col_defs, "defaultColDef": {"suppressMovable": True}, "rowHeight": 40, "headerHeight": 40}
-                res = AgGrid(df, gridOptions=go, allow_unsafe_jscode=True, fit_columns_on_grid_load=False, update_mode=GridUpdateMode.MODEL_CHANGED, theme="alpine", key=f"ag_sch_{w_idx}")
-                
-                # 同步資料
-                grid_data = res['data']
-                if grid_data is not None and len(grid_data) > 0:
-                    if isinstance(grid_data, pd.DataFrame): records = grid_data.to_dict('records')
-                    else: records = grid_data
-                    
-                    for row in records:
-                        p_type = row.get("type"); p_name = row.get("name")
-                        p_key = row.get("key"); p_idx = row.get("idx")
-                        
-                        for d_info in w_dates:
-                            if not d_info["is_curr"]: continue
-                            for s in ["早", "午", "晚"]:
-                                field = f"{d_info['str']}_{s}"
-                                val = row.get(field, "")
-                                v_name = n2nm.get(val, "")
-                                k = field
+                        inner = rc[col_idx+1].columns(3)
+                        for s_idx, s in enumerate(["早", "午", "晚"]):
+                            if not d_info["is_curr"]:
+                                # 加入細線與粗線的 class
+                                b_cls = ""
+                                if s_idx == 0: b_cls = "border-left-thick border-right-thin"
+                                elif s_idx == 1: b_cls = "border-right-thin"
+                                elif s_idx == 2: b_cls = "border-right-thick"
+                                inner[s_idx].markdown(f"<div class='bg-fill {b_cls}' style='background-color:#f0f0f0; border-top:1px solid #d3d3d3; border-bottom:1px solid #d3d3d3;'></div><div style='text-align:center; color:#ccc; padding-top:10px;'>-</div>", unsafe_allow_html=True)
+                                continue
                                 
-                                if p_type == "doc": edited_res[k]["doctors"][p_name] = v_name
-                                elif p_type == "role":
-                                    if p_key not in edited_res[k]: edited_res[k][p_key] = []
-                                    while len(edited_res[k][p_key]) <= p_idx: edited_res[k][p_key].append("")
-                                    edited_res[k][p_key][p_idx] = v_name
+                            k = f"{d_info['str']}_{s}"
+                            curr_val = ""
+                            
+                            # 抓取當前值
+                            if row_data["type"] == "doc":
+                                curr_val = nm2n.get(edited_res.get(k, {}).get("doctors", {}).get(row_data["name"], ""), "")
+                            else:
+                                lst = edited_res.get(k, {}).get(row_data["key"], [])
+                                if row_data["idx"] < len(lst):
+                                    curr_val = nm2n.get(lst[row_data["idx"]], "")
+                                    
+                            # 設定下拉選單與顏色背景及框線
+                            try:
+                                def_idx = asst_opts.index(curr_val)
+                            except ValueError:
+                                def_idx = 0
+                                
+                            bg_color = [bg_morn, bg_aft, bg_eve][s_idx]
+                            b_cls = ""
+                            if s_idx == 0: b_cls = "border-left-thick border-right-thin"
+                            elif s_idx == 1: b_cls = "border-right-thin"
+                            elif s_idx == 2: b_cls = "border-right-thick"
+                            
+                            inner[s_idx].markdown(f"<div class='bg-fill {b_cls}' style='background-color:{bg_color}; border-top:1px solid #d3d3d3; border-bottom:1px solid #d3d3d3;'></div>", unsafe_allow_html=True)
+                            
+                            new_val = inner[s_idx].selectbox(
+                                "", 
+                                options=asst_opts, 
+                                index=def_idx, 
+                                key=f"sel_{w_idx}_{row_data['label']}_{k}",
+                                label_visibility="collapsed"
+                            )
+                            
+                            # 更新至 edited_res
+                            v_name = n2nm.get(new_val, "")
+                            if k not in edited_res:
+                                edited_res[k] = {"doctors": {}, "counter": [], "floater": [], "look": []}
+                                
+                            if row_data["type"] == "doc":
+                                edited_res[k]["doctors"][row_data["name"]] = v_name
+                            else:
+                                rk = row_data["key"]; ri = row_data["idx"]
+                                if rk not in edited_res[k]: edited_res[k][rk] = []
+                                while len(edited_res[k][rk]) <= ri: edited_res[k][rk].append("")
+                                edited_res[k][rk][ri] = v_name
 
-            if st.form_submit_button("💾 儲存並更新數據", type="primary"):
+            submitted = st.form_submit_button("💾 儲存並更新數據", type="primary")
+            if submitted:
                 st.session_state.result = edited_res
                 st.session_state["sys_msg"] = "✅ 總管班表微調已儲存，演算法及防呆指標更新完畢！"
                 st.rerun()
