@@ -20,7 +20,7 @@ except ImportError:
     HAS_AGGRID = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v21.6 (白名單優先與UI優化版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v21.7 (重新排班與AI強化版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 if not HAS_AGGRID:
@@ -174,7 +174,7 @@ def parse_slot_string(text, is_fixed=False):
         if wd is not None and sh is not None: res_set.add((wd, sh))
     return res_set
 
-# --- 3. 核心排班演算法 (強化白名單優先) ---
+# --- 3. 核心排班演算法 ---
 def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_count, flt_count):
     assts = get_active_assistants(); docs = get_active_doctors()
     year = st.session_state.config.get("year", datetime.today().year)
@@ -314,8 +314,8 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
 
 # --- 4. API 呼叫 ---
 def call_gemini_api(api_key, prompt):
-    # 使用 gemini-2.5-flash-preview-09-2025 模型
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={api_key}"
+    # 使用 gemini-1.5-flash，穩定度高，免費配額大
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
     for delay in [3, 8, 15]:
@@ -524,7 +524,6 @@ elif step == "3. 進階限制":
         with c5.popover("📅 白名單"):
             wl_s = parse_slot_string(r.get("slot_whitelist","")); wl_grid = []; days = ["一","二","三","四","五","六"]
             
-            # 加入早中晚標題
             head_cols = st.columns(4)
             head_cols[0].write("")
             head_cols[1].write("**早**")
@@ -538,7 +537,6 @@ elif step == "3. 進階限制":
         with c6.popover("💼 行政"):
             ad_s = parse_slot_string(r.get("admin_slots","")); ad_grid = []
             
-            # 加入早中晚標題
             head_cols = st.columns(4)
             head_cols[0].write("")
             head_cols[1].write("**早**")
@@ -655,7 +653,7 @@ elif step == "7. 排班微調":
             curr_counts = {a["name"]: 0 for a in assts}; curr_floaters = {a["name"]: 0 for a in assts}
             daily_p = collections.defaultdict(lambda: collections.defaultdict(set))
             
-            # 先計算排班格內的結果
+            # 計算排班格內的結果
             for k, v in st.session_state.result.items():
                 dt_str, sh = k.split("_"); ppl = list(v["doctors"].values()) + v["counter"] + v["floater"] + v["look"]
                 for p in [x for x in ppl if x]:
@@ -691,33 +689,106 @@ elif step == "7. 排班微調":
     c1, c2 = st.columns(2); ctr = c1.slider("櫃台人數", 1,3,2); flt = c2.slider("流動人數",0,3,1)
     if st.button("🚀 執行自動排班演算法", type="primary"):
         with st.spinner("終極演算法運算中..."):
+            # 點擊時強制清除舊結果重新排班
+            if 'result' in st.session_state: del st.session_state['result']
+            if 'saved_result' in st.session_state.config: del st.session_state.config['saved_result']
+            
             res = run_auto_schedule(st.session_state.config["manual_schedule"], st.session_state.config["leaves"], st.session_state.config.get("pairing_matrix",{}), st.session_state.config.get("adv_rules",{}), ctr, flt)
             st.session_state.result = res; st.session_state.config["saved_result"] = res; save_config(st.session_state.config); st.rerun()
             
     if 'result' in st.session_state:
-        with st.expander("🤖 Gemini AI 指令助手 (穩定版)", expanded=False):
+        with st.expander("🤖 Gemini AI 指令助手 (支援多種格式)", expanded=False):
             api_key = st.text_input("API Key", value=st.session_state.config.get("api_key",""), type="password")
-            cmd = st.text_area("口語指令", placeholder="Ex: 峻豪醫師禮拜四整天昀霏跟診")
+            st.info("提示：支援指令如：『峻豪醫師禮拜四整天給昀霏跟』、『欣霓第3個星期六早午上班』、『雯萱第3個星期六休假』、『佳萱4/10請假』")
+            cmd = st.text_area("請輸入指令")
             if st.button("執行 AI 調整"):
                 if api_key:
                     st.session_state.config["api_key"] = api_key; save_config(st.session_state.config)
                     with st.spinner("AI 思考中..."):
                         docs_str = ",".join([d["name"] for d in get_active_doctors()]); asst_str = ",".join([a["name"] for a in get_active_assistants()])
-                        prompt = f"牙醫排班年月:{y}/{m}。醫師:{docs_str}。助理:{asst_str}。轉JSON動作:[{{'doctor': 'NAME', 'assistant': 'NAME', 'weekday': 1-6, 'shift': '早/午/晚/null'}}]。指令:{cmd}"
+                        prompt = f"""
+                        牙醫排班年月:{y}年{m}月。
+                        醫師名單:{docs_str}。
+                        助理名單:{asst_str}。
+                        請將使用者的指令轉換為 JSON 陣列。
+                        
+                        action 類型包含: 
+                        1. "assign_assistant_to_doctor" (指定跟診)
+                        2. "leave" (請假/休假)
+                        3. "force_assign" (強制上班)
+                        
+                        欄位包含: 
+                        - "doctor" (醫師名稱，可為 null)
+                        - "assistant" (助理名稱)
+                        - "weekday" (1-6 代表週一至週六，可為 null)
+                        - "week_number" (第幾個星期幾，如第3個星期六則為 3，可為 null)
+                        - "date" (特定日期格式 YYYY-MM-DD，如 4/10 則為 {y}-04-10，可為 null)
+                        - "shift" ("早"/"午"/"晚"/null代表整天)
+                        
+                        使用者指令：{cmd}
+                        
+                        請嚴格只回傳 JSON 格式陣列，不要有其他文字。
+                        """
                         raw = call_gemini_api(api_key, prompt)
                         if raw.startswith("ERROR:"): st.error(f"AI 異常: {raw[6:]}")
                         else:
                             try:
                                 clean_json = re.sub(r'```json\s*|\s*```', '', raw).strip(); acts = json.loads(clean_json); er = st.session_state.result.copy()
+                                
+                                # 日期計算輔助
+                                def get_target_dates(act, year, month):
+                                    targets = []
+                                    if act.get("date"):
+                                        targets.append(act["date"])
+                                    elif act.get("weekday"):
+                                        wd_target = act["weekday"] - 1 # 0-5
+                                        count = 0
+                                        for d in range(1, calendar.monthrange(year, month)[1] + 1):
+                                            dt_obj = date(year, month, d)
+                                            if dt_obj.weekday() == wd_target:
+                                                count += 1
+                                                if act.get("week_number") and count != act["week_number"]: continue
+                                                targets.append(str(dt_obj))
+                                    return targets
+
                                 for act in acts:
-                                    for k, v in er.items():
-                                        ds, sh = k.split("_"); dt_obj = datetime.strptime(ds, "%Y-%m-%d").date()
-                                        if (act.get("weekday") and (dt_obj.weekday()+1) != act["weekday"]) or (act.get("shift") and sh != act["shift"]): continue
-                                        if act.get("doctor") in v["doctors"]:
-                                            anm = act["assistant"]; v["doctors"][act["doctor"]] = anm
-                                            for ky in ["counter", "floater"]: v[ky] = [x if x != anm else "" for x in v[ky]]
-                                st.session_state.result = er; st.rerun()
-                            except: st.error("AI 解析失敗，請換個說法")
+                                    targets = get_target_dates(act, y, m)
+                                    anm = act.get("assistant")
+                                    action_type = act.get("action")
+                                    shifts = ["早","午","晚"] if not act.get("shift") else [act["shift"]]
+                                    
+                                    for dt_str in targets:
+                                        for sh in shifts:
+                                            k = f"{dt_str}_{sh}"
+                                            if k not in er: continue
+                                            
+                                            v = er[k]
+                                            
+                                            if action_type == "leave":
+                                                # 請假：將該人從所有位子移除
+                                                for d_key in v["doctors"]:
+                                                    if v["doctors"][d_key] == anm: v["doctors"][d_key] = ""
+                                                for ky in ["counter", "floater", "look"]: v[ky] = [x if x != anm else "" for x in v[ky]]
+                                                
+                                            elif action_type == "assign_assistant_to_doctor":
+                                                doc_name = act.get("doctor")
+                                                if doc_name and doc_name in v["doctors"]:
+                                                    v["doctors"][doc_name] = anm
+                                                    for ky in ["counter", "floater", "look"]: v[ky] = [x if x != anm else "" for x in v[ky]]
+                                                    
+                                            elif action_type == "force_assign":
+                                                # 強制排班：如果還沒被排進去，先塞進流動
+                                                is_assigned = any(v["doctors"].get(d) == anm for d in v["doctors"]) or anm in v["counter"] or anm in v["floater"] or anm in v["look"]
+                                                if not is_assigned:
+                                                    for i in range(len(v["floater"])):
+                                                        if not v["floater"][i]:
+                                                            v["floater"][i] = anm
+                                                            break
+                                                    else:
+                                                        v["floater"].append(anm) # 硬塞
+                                                        
+                                st.session_state.result = er; st.session_state.config["saved_result"] = er; save_config(st.session_state.config); st.rerun()
+                            except Exception as e: st.error(f"AI 解析失敗，可能是指令過於模糊或回傳格式錯誤。詳細錯誤：{e}")
 
         docs = get_active_doctors(); p_weeks = get_padded_weeks(y, m); a_opts = [""] + [a["nick"] for a in get_active_assistants()]
         nm2n = {a["name"]: a["nick"] for a in get_active_assistants()}; n2nm = {a["nick"]: a["name"] for a in get_active_assistants()}
@@ -766,6 +837,7 @@ elif step == "7. 排班微調":
                 st.markdown("<br>", unsafe_allow_html=True)
 
             if st.form_submit_button("💾 同步更新與儲存"):
+                # 直接儲存 session_state 裡面的值
                 st.session_state.config["saved_result"] = st.session_state.result; save_config(st.session_state.config); st.rerun()
 
 elif step == "8. 報表下載":
