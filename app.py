@@ -255,7 +255,8 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             # --- 嚴格鐵律 ---
             if wd == 5 and asst_info.get("type") == "全職":
                 sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[name][d])
-                if sh == "晚" and sat_nites >= 1: return False 
+                # 放寬為允許2個星期六晚班
+                if sh == "晚" and sat_nites >= 2: return False 
                 
                 # 確保至少有一個完整的星期六休息 (整天都沒有班)
                 off_sats = [sd for sd in sat_dates if len(p_daily[name][sd]) == 0]
@@ -305,8 +306,9 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                     
                     # === 加入排班鐵律的防呆懲罰 (給 Phase 3 填洞時參考) ===
                     sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[c][d])
-                    if sh == "晚" and sat_nites >= 1:
-                        score -= 2000000  # 極度不想排第二個六晚
+                    # 超過2個星期六晚班，給予極大懲罰
+                    if sh == "晚" and sat_nites >= 2:
+                        score -= 2000000  # 極度不想排第三個六晚
                     
                     off_sats = [sd for sd in sat_dates if len(p_daily[c][sd]) == 0]
                     if len(off_sats) == 1 and off_sats[0] == dt_str:
@@ -363,11 +365,15 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             
             asst_info = next((a for a in assts if a["name"] == name), {})
 
-            # 【強制防線】：填洞時也絕對不允許犧牲最後一個完整休假的星期六
+            # 【強制防線】：填洞時也絕對不允許犧牲最後一個完整休假的星期六，以及不允許超過2個六晚
             if wd == 5 and asst_info.get("type") == "全職":
+                sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[name][d])
+                if sh == "晚" and sat_nites >= 2:
+                    return False # 絕對阻擋，超過2次六晚寧可留空！
+
                 off_sats = [sd for sd in sat_dates if len(p_daily[name][sd]) == 0]
                 if len(off_sats) == 1 and off_sats[0] == dt_str: 
-                    return False # 絕對阻擋，寧可留空！
+                    return False # 絕對阻擋，沒有完整休假寧可留空！
 
             rule = adv_rules.get(name, {})
             s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
@@ -901,7 +907,7 @@ elif step == "7. 排班微調":
                     else: s_day += 1
                         
                 st.markdown(f"**{nm}** ({a['type']})\n- 總診: :{status_color}[{curr_counts[nm]}] | **流: {curr_floaters[nm]}**")
-                s_status = "✅" if s_off >= 1 and s_nite <= 1 else "⚠️"
+                s_status = "✅" if s_off >= 1 and s_nite <= 2 else "⚠️"
                 if a["type"] == "兼職": s_status = "🆗(PT)"
                 st.caption(f"- {s_status} 週六: 休{s_off}|早午{s_day}|晚{s_nite}")
                 if triples or heaven_earth: st.markdown(f"- 🚩 :orange[全:{triples}]|:red[天:{heaven_earth}]")
