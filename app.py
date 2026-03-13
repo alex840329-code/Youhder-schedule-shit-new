@@ -1304,7 +1304,17 @@ elif step == "7. 排班微調":
             if st.form_submit_button("💾 同步更新與儲存"):
                 # 重大修復：真正讀取前端網格的修改並寫回 st.session_state.result
                 for wi in range(len(p_weeks)):
-                    ag_data = st.session_state.get(f"ag_final_{wi}", {}).get("data")
+                    ag_state = st.session_state.get(f"ag_final_{wi}")
+                    if ag_state is None: continue
+                    
+                    ag_data = None
+                    if hasattr(ag_state, 'data'):
+                        ag_data = ag_state.data
+                    elif isinstance(ag_state, dict):
+                        ag_data = ag_state.get("data")
+                    elif isinstance(ag_state, pd.DataFrame):
+                        ag_data = ag_state
+                        
                     if ag_data is not None:
                         df_out = pd.DataFrame(ag_data) if isinstance(ag_data, list) else ag_data
                         for _, r in df_out.iterrows():
