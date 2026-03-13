@@ -20,7 +20,7 @@ except ImportError:
     HAS_AGGRID = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v21.18 (連班磁吸與多日期解析版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v21.19 (手動覆寫與救援獨立版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 if not HAS_AGGRID:
@@ -54,6 +54,8 @@ function(params) {
     if (shift === '晚') style['borderRight'] = '2px solid #333'; 
     if (val === '-' || val === '⬛' || val === '休') { style['backgroundColor'] = '#f0f0f0'; style['color'] = '#aaa'; return style; }
     if (val === '⚠️缺' || val === '⚠️缺人') { style['backgroundColor'] = '#ffcccc'; style['color'] = '#e60000'; return style; }
+    if (val && val.includes('(救)')) { style['backgroundColor'] = '#e6ccff'; style['color'] = '#4b0082'; return style; }
+    
     if (isOdd) {
         if (shift === '早') style['backgroundColor'] = '#FDE9D9';
         if (shift === '午') style['backgroundColor'] = '#FCD5B4';
@@ -184,7 +186,8 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         return (0 if wd == 5 else 1, dt_str, {"早":1,"午":2,"晚":3}.get(sh, 9))
     
     slots = sorted(list(set([f"{x['Date']}_{x['Shift']}" for x in manual_schedule])), key=slot_sort_key)
-    result = {s: {"doctors": {}, "counter": [], "floater": [], "look": []} for s in slots}
+    # 初始化加入 rescued 追蹤陣列
+    result = {s: {"doctors": {}, "counter": [], "floater": [], "look": [], "rescued": {"doctors": [], "counter": [], "floater": []}} for s in slots}
     
     parsed_fixed = {}; parsed_admin = {}
     for name, r in adv_rules.items():
@@ -234,7 +237,6 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         duty_docs = [x["Doctor"] for x in manual_schedule if x["Date"]==dt_str and x["Shift"]==sh]
         slot_res = result[slot]
         
-        # --- 動態判斷是否需要流動 2 ---
         current_flt_count = flt_count
         if dynamic_flt and len(duty_docs) >= 5: 
             current_flt_count = max(flt_count, 2)
@@ -249,22 +251,18 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             
             asst_info = next((a for a in assts if a["name"] == name), {})
             
-            # --- 絕對白名單 ---
             rule = adv_rules.get(name, {})
             s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
             if s_wl and (wd, sh) not in s_wl: return False
             
-            # --- 嚴格鐵律 ---
+            # --- 星期六嚴格鐵律 ---
             if wd == 5 and asst_info.get("type") == "全職":
-                # 1. 晚班上限2次 (保證至少有一個星期六晚上休息)
                 sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[name][d])
                 if sh == "晚" and sat_nites >= 2: return False 
                 
-                # 2. 確保至少有一個完整的星期六休息 (最多只能上總星期六數-1天)
                 worked_sats = [sd for sd in sat_dates if len(p_daily[name][sd]) > 0]
                 if dt_str not in worked_sats and len(worked_sats) >= len(sat_dates) - 1: return False 
                 
-                # 3. 晚班必須綁午班 (禁止出現早晚、或單晚)，但允許直接從午班開始 (形成午晚)
                 if sh == "晚" and "午" not in p_daily[name][dt_str]: return False
             
             if p_counts[name] >= p_limits[name] and wd != 5: return False 
@@ -281,11 +279,10 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                     if av in slot_res["counter"]: return False
             return True
 
-        def calculate_priority(candidates, r_type, strict=True):
+        def calculate_priority(candidates, r_type):
             scored = []
             for c in candidates:
-                if strict and not can_assign_strict(c, r_type): continue
-                if not strict and not can_assign_relaxed(c, r_type): continue
+                if not can_assign_strict(c, r_type): continue
                 
                 asst_info = next((a for a in assts if a["name"] == c), {})
                 rule = adv_rules.get(c, {})
@@ -298,49 +295,27 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 if r_type == "counter":
                     if asst_info.get("is_main_counter"): score += 50000 
                     if asst_info.get("type") == "兼職": score += 20000
-                    # 【修復】大幅提升「僅晚班」權重，超越白名單分數，保證小瑜排得上
                     if rule.get("shift_limit") == "僅晚班" and sh == "晚": score += 800000
                 
                 if r_type == "floater":
                     if asst_info.get("is_main_counter"): score -= 100000 
                     else: 
-                        if balance_flt:
-                            # 強制拉平流動次數
-                            score += (50 - p_floater_counts[c]) * 100000
-                        else:
-                            # 回歸正常權重，較不影響醫師配對
-                            score += (50 - p_floater_counts[c]) * 500
+                        if balance_flt: score += (50 - p_floater_counts[c]) * 100000
+                        else: score += (50 - p_floater_counts[c]) * 500
                 
                 if wd == 5 and asst_info.get("type") == "全職": 
                     score += 15000
-                    
                     worked_sats = sum(1 for sd in sat_dates if sd != dt_str and len(p_daily[c][sd]) > 0)
                     sat_nites = sum(1 for d in sat_dates if d != dt_str and "晚" in p_daily[c][d])
                     
-                    # 確保班表連貫性 (透過千萬級別高分磁吸)
                     if sh == "早":
-                        if worked_sats < len(sat_dates) - 1: 
-                            score += 5000000 # 迫切需要湊滿上班天數，強力吸進早班
+                        if worked_sats < len(sat_dates) - 1: score += 5000000
                     elif sh == "午":
-                        if "早" in p_daily[c][dt_str]: 
-                            score += 10000000 # 絕對優先讓早上有班的人接著上下午
+                        if "早" in p_daily[c][dt_str]: score += 10000000 
                         else:
-                            if worked_sats < len(sat_dates) - 1:
-                                score += 3000000 # 允許直接從午班開始上 (為了後續形成午晚)
+                            if sat_nites < 2 and worked_sats < len(sat_dates) - 1: score += 3000000 
                     elif sh == "晚":
-                        if "午" in p_daily[c][dt_str] and sat_nites < 2: 
-                            score += 10000000 # 絕對優先讓下午有班的人接著上晚班，達成2個晚班的目標
-                        else: 
-                            score -= 1000000 # 懲罰斷班
-                            
-                    # 防呆絕對懲罰
-                    curr_nites = sum(1 for d in sat_dates if "晚" in p_daily[c][d])
-                    if sh == "晚" and curr_nites >= 2:
-                        score -= 20000000  
-                    
-                    curr_worked = [sd for sd in sat_dates if len(p_daily[c][sd]) > 0]
-                    if dt_str not in curr_worked and len(curr_worked) >= len(sat_dates) - 1:
-                        score -= 20000000  
+                        if "午" in p_daily[c][dt_str] and sat_nites < 2: score += 10000000
                 
                 scored.append((c, score + random.random()))
             scored.sort(key=lambda x: x[1], reverse=True)
@@ -348,77 +323,93 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
 
         cand_pool = [a["name"] for a in assts]
         
-        # 1. 先排櫃台
+        # 先排櫃台
         needed_ctr = ctr_count - len(slot_res["counter"])
-        for c in calculate_priority(cand_pool, "counter", strict=True):
+        for c in calculate_priority(cand_pool, "counter"):
             if needed_ctr <= 0: break
             slot_res["counter"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); needed_ctr -= 1
             
         if balance_flt:
-            # 2. 開啟平衡流動模式：先搶流動名額
             needed_flt = current_flt_count - len(slot_res["floater"])
-            for c in calculate_priority(cand_pool, "floater", strict=True):
+            for c in calculate_priority(cand_pool, "floater"):
                 if needed_flt <= 0: break
                 slot_res["floater"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); p_floater_counts[c] += 1; needed_flt -= 1
 
-            # 3. 最後挑跟診
             for d_name in duty_docs:
                 if d_name in slot_res["doctors"]: continue
                 picked = None; targets = [pairing_matrix.get(d_name, {}).get(k) for k in ["1","2","3"]]
                 for t in [x for x in targets if x]:
                     if can_assign_strict(t, "doctor"): picked = t; break
                 if not picked:
-                    for c in calculate_priority(cand_pool, "doctor", strict=True): picked = c; break
+                    for c in calculate_priority(cand_pool, "doctor"): picked = c; break
                 if picked: slot_res["doctors"][d_name] = picked; p_counts[picked] += 1; p_daily[picked][dt_str].add(sh)
         else:
-            # 2. 關閉平衡流動模式：先讓醫師挑選愛用助理
             for d_name in duty_docs:
                 if d_name in slot_res["doctors"]: continue
                 picked = None; targets = [pairing_matrix.get(d_name, {}).get(k) for k in ["1","2","3"]]
                 for t in [x for x in targets if x]:
                     if can_assign_strict(t, "doctor"): picked = t; break
                 if not picked:
-                    for c in calculate_priority(cand_pool, "doctor", strict=True): picked = c; break
+                    for c in calculate_priority(cand_pool, "doctor"): picked = c; break
                 if picked: slot_res["doctors"][d_name] = picked; p_counts[picked] += 1; p_daily[picked][dt_str].add(sh)
 
-            # 3. 剩下的人再去當流動
             needed_flt = current_flt_count - len(slot_res["floater"])
-            for c in calculate_priority(cand_pool, "floater", strict=True):
+            for c in calculate_priority(cand_pool, "floater"):
                 if needed_flt <= 0: break
                 slot_res["floater"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); p_floater_counts[c] += 1; needed_flt -= 1
 
-    # 3. 自動排班 (填洞救援階段)
+    # 本次更新：移除自動排班中的「強制填洞」，保留絕對空缺供使用者確認，並由另一個專屬救援函數處理填洞。
+    return result
+
+# --- 新增：專屬填洞救援演算法 (破格抓人) ---
+def run_phase3_rescue(current_result, manual_schedule, leaves, adv_rules, assts, ctr_count, flt_count, year, month):
+    dates = generate_month_dates(year, month)
+    sat_dates = [str(dt) for dt in dates if dt.weekday() == 5]
+    std_min, std_max = calculate_shift_limits(year, month)
+    
+    p_targets = {}; p_limits = {}
+    for a in assts:
+        nm = a["name"]
+        p_limits[nm] = std_max if a.get("type") == "全職" else (a.get("custom_max") or 15)
+        p_targets[nm] = std_max if a.get("type") == "全職" else (a.get("custom_max") or 15)
+            
+    p_counts = {a["name"]: 0 for a in assts}
+    p_floater_counts = {a["name"]: 0 for a in assts} 
+    p_daily = {a["name"]: collections.defaultdict(set) for a in assts}
+    
+    # 重算當前時數
+    for slot, res in current_result.items():
+        dt_str, sh = slot.split("_")
+        for d_name, a_name in res.get("doctors", {}).items():
+            if a_name: p_counts[a_name] += 1; p_daily[a_name][dt_str].add(sh)
+        for a_name in res.get("counter", []):
+            if a_name: p_counts[a_name] += 1; p_daily[a_name][dt_str].add(sh)
+        for a_name in res.get("floater", []):
+            if a_name: p_counts[a_name] += 1; p_daily[a_name][dt_str].add(sh); p_floater_counts[a_name] += 1
+        for a_name in res.get("look", []):
+            if a_name: p_counts[a_name] += 1; p_daily[a_name][dt_str].add(sh)
+            
+    slots = sorted(list(current_result.keys()), key=lambda x: (x.split("_")[0], {"早":1,"午":2,"晚":3}.get(x.split("_")[1], 9)))
+    
     for slot in slots:
         dt_str, sh = slot.split("_"); curr_dt = datetime.strptime(dt_str, "%Y-%m-%d").date(); wd = curr_dt.weekday()
-        slot_res = result[slot]
-        duty_docs = [x["Doctor"] for x in manual_schedule if x["Date"]==dt_str and x["Shift"]==sh]
+        slot_res = current_result[slot]
+        if "rescued" not in slot_res: slot_res["rescued"] = {"doctors": [], "counter": [], "floater": []}
         
-        current_flt_count = flt_count
-        if dynamic_flt and len(duty_docs) >= 5: 
-            current_flt_count = max(flt_count, 2)
-            
+        duty_docs = [x["Doctor"] for x in manual_schedule if x["Date"]==dt_str and x["Shift"]==sh]
+        dyn_flt_val = st.session_state.config.get("dynamic_flt", True)
+        current_flt_count = max(flt_count, 2) if (dyn_flt_val and len(duty_docs) >= 5) else flt_count
+        
         needed_ctr = ctr_count - len(slot_res["counter"])
         needed_flt = current_flt_count - len(slot_res["floater"])
+        missing_docs = [d for d in duty_docs if d not in slot_res["doctors"] or not slot_res["doctors"][d]]
         
-        if needed_ctr <= 0 and needed_flt <= 0: continue
+        if needed_ctr <= 0 and needed_flt <= 0 and not missing_docs: continue
         
-        def can_assign_relaxed(name, role):
+        def can_assign_rescue(name, role):
             if name in slot_res["counter"] or name in slot_res["floater"] or name in slot_res["look"] or name in slot_res["doctors"].values(): return False
             if f"{name}_{dt_str}_{sh}" in leaves: return False
             
-            asst_info = next((a for a in assts if a["name"] == name), {})
-
-            # 【強制防線】：絕對不能剝奪最後一個完整休假的星期六，以及不允許超過2個六晚
-            if wd == 5 and asst_info.get("type") == "全職":
-                sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[name][d])
-                if sh == "晚" and sat_nites >= 2: return False 
-
-                worked_sats = [sd for sd in sat_dates if len(p_daily[name][sd]) > 0]
-                if dt_str not in worked_sats and len(worked_sats) >= len(sat_dates) - 1: return False 
-                
-                # 填洞階段依然要求晚班必須綁午班
-                if sh == "晚" and "午" not in p_daily[name][dt_str]: return False
-
             rule = adv_rules.get(name, {})
             s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
             if s_wl and (wd, sh) not in s_wl: return False
@@ -429,90 +420,97 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             if rule.get("shift_limit") == "僅晚班" and sh != "晚": return False
             if rule.get("shift_limit") == "僅早班" and sh != "早": return False
             if rule.get("shift_limit") == "僅午班" and sh != "午": return False
-            
             return True
+            
+        def calculate_priority_rescue(candidates, r_type):
+            scored = []
+            for c in candidates:
+                if not can_assign_rescue(c, r_type): continue
+                
+                asst_info = next((a for a in assts if a["name"] == c), {})
+                gap = p_targets[c] - p_counts[c]
+                score = gap * 2000 
+                
+                # 救援階段：扣除極大分數作為阻擋，但如果真的沒人，系統還是會抓分數最低的人來填洞
+                if wd == 5 and asst_info.get("type") == "全職":
+                    sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[c][d])
+                    if sh == "晚" and sat_nites >= 2: score -= 10000000
+                    
+                    curr_worked = [sd for sd in sat_dates if len(p_daily[c][sd]) > 0]
+                    if dt_str not in curr_worked and len(curr_worked) >= len(sat_dates) - 1: score -= 10000000
+                    
+                    if sh == "晚" and "午" not in p_daily[c][dt_str]: score -= 10000000
+                    if sh == "午" and "早" not in p_daily[c][dt_str]: score -= 1000000 # 盡量不要單抓午班來救火
+                    
+                scored.append((c, score + random.random()))
+            scored.sort(key=lambda x: x[1], reverse=True)
+            return [x[0] for x in scored]
 
         cand_pool = [a["name"] for a in assts]
         
         if needed_ctr > 0:
-            for c in calculate_priority(cand_pool, "counter", strict=False):
+            for c in calculate_priority_rescue(cand_pool, "counter"):
                 if needed_ctr <= 0: break
                 slot_res["counter"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); needed_ctr -= 1
+                slot_res["rescued"]["counter"].append(c)
                 
         if needed_flt > 0:
-            for c in calculate_priority(cand_pool, "floater", strict=False):
+            for c in calculate_priority_rescue(cand_pool, "floater"):
                 if needed_flt <= 0: break
                 slot_res["floater"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); p_floater_counts[c] += 1; needed_flt -= 1
-
-    return result
+                slot_res["rescued"]["floater"].append(c)
+                
+        for d_name in missing_docs:
+            for c in calculate_priority_rescue(cand_pool, "doctor"):
+                slot_res["doctors"][d_name] = c; p_counts[c] += 1; p_daily[c][dt_str].add(sh)
+                slot_res["rescued"]["doctors"].append(c)
+                break
+                
+    return current_result
 
 # --- 4. 本地關鍵字解析與 API 雙引擎 ---
 def fuzzy_match_person(name_str, lst):
     clean = name_str.replace("醫師", "").strip()
-    
     for item in lst:
         if clean == item["name"] or (item.get("nick") and clean == item["nick"]):
             return item["name"]
             
-    best_match = None
-    max_overlap = 0
+    best_match = None; max_overlap = 0
     for item in lst:
-        nm = item["name"]
-        nk = item.get("nick", "")
-        
-        if nm in clean and len(nm) > max_overlap:
-            best_match = nm; max_overlap = len(nm)
-        elif clean in nm and len(clean) > max_overlap:
-            best_match = nm; max_overlap = len(clean)
-            
+        nm = item["name"]; nk = item.get("nick", "")
+        if nm in clean and len(nm) > max_overlap: best_match = nm; max_overlap = len(nm)
+        elif clean in nm and len(clean) > max_overlap: best_match = nm; max_overlap = len(clean)
         if nk:
-            if nk in clean and len(nk) > max_overlap:
-                best_match = nm; max_overlap = len(nk)
-            elif clean in nk and len(clean) > max_overlap:
-                best_match = nm; max_overlap = len(clean)
-                
-    if best_match: 
-        return best_match
-
+            if nk in clean and len(nk) > max_overlap: best_match = nm; max_overlap = len(nk)
+            elif clean in nk and len(clean) > max_overlap: best_match = nm; max_overlap = len(clean)
+    if best_match: return best_match
     return clean + "醫師" if any("醫師" in d["name"] for d in lst) else clean
 
 def parse_command_local(cmd, year, month, docs, assts):
     acts = []; wd_map = {"一":1, "二":2, "三":3, "四":4, "五":5, "六":6, "日":7, "天":7, "1":1, "2":2, "3":3, "4":4, "5":5, "6":6, "7":7}
     
-    # 支援逗號分隔的多日期處理 (例如: 小瑜 4/4, 4/11, 4/18 晚上上班)
     expanded_lines = []
     for raw_line in cmd.split('\n'):
         raw_line = raw_line.strip()
         if not raw_line: continue
         
-        # 尋找連續逗號分隔的日期群
-        multi_date_match = re.search(r'((?:\d+[月/.-])?\d+[號日]?(?:\s*[，,、]\s*(?:\d+[月/.-])?\d+[號日]?)+)', raw_line)
-        if multi_date_match:
-            dates_str = multi_date_match.group(1)
-            date_items = re.split(r'\s*[，,、]\s*', dates_str)
-            base_str = raw_line.replace(dates_str, "{_DATE_}")
-            last_m = str(month)
-            for di in date_items:
-                dm = re.match(r'(?:(\d+)[月/.-])?(\d+)[號日]?', di.strip())
-                if dm:
-                    if dm.group(1): last_m = dm.group(1)
-                    d_val = dm.group(2)
-                    expanded_lines.append(base_str.replace("{_DATE_}", f"{last_m}/{d_val}"))
+        m_multi = re.search(r'^([^\s\d]+(?:醫師)?)\s+([\d/.,、\s]+)\s+([^\d/.,、\s].+)$', raw_line)
+        if m_multi:
+            name = m_multi.group(1); dates_str = m_multi.group(2); action = m_multi.group(3)
+            dates = re.split(r'[、,，\s]+', dates_str.strip())
+            for d in dates:
+                if d: expanded_lines.append(f"{name} {d} {action}")
         else:
-            # 兼容舊版，若沒有特殊多日期格式，直接把頓號取代為換行
-            expanded_lines.extend(raw_line.replace("，", "\n").replace("、", "\n").split("\n"))
+            expanded_lines.append(raw_line)
 
     for line in expanded_lines:
         line = line.strip()
-        if not line: 
-            continue
+        if not line: continue
         
         m1 = re.search(r'([^\s\d\(\)]+?)(?:醫師)?\s*(?:禮拜|星期|週|周)([一二三四五六日天1-7])\s*(整天|早上|下午|晚上|早午晚|早午|午晚|早晚|早|午|晚)?\s*(?:給|讓|由|指定)?\s*([^\s\d\(\)]+?)\s*(?:跟|上)', line)
         if m1:
             doc = fuzzy_match_person(m1.group(1), docs)
-            wd = wd_map.get(m1.group(2))
-            sh_str = m1.group(3) or "整天"
-            asst = fuzzy_match_person(m1.group(4), assts)
+            wd = wd_map.get(m1.group(2)); sh_str = m1.group(3) or "整天"; asst = fuzzy_match_person(m1.group(4), assts)
             shift = None
             if "早" in sh_str and "午" not in sh_str: shift = "早"
             elif "午" in sh_str or "下午" in sh_str: shift = "午"
@@ -523,8 +521,7 @@ def parse_command_local(cmd, year, month, docs, assts):
         m2 = re.search(r'([^\s\d\(\)]+?)(?:醫師)?\s*第\s*(\d+)\s*[個]*\s*(?:星期|禮拜|週|周)([一二三四五六日天1-7])\s*(整天|早上|下午|晚上|早午晚|早午|午晚|早晚|早|午|晚)?\s*(?:要|想)?(?:休假|請假|排班|上班|休息)', line)
         if m2:
             person = fuzzy_match_person(m2.group(1), assts + docs)
-            w_num = int(m2.group(2)); wd = wd_map.get(m2.group(3))
-            sh_str = m2.group(4) or "整天"
+            w_num = int(m2.group(2)); wd = wd_map.get(m2.group(3)); sh_str = m2.group(4) or "整天"
             act_type = "leave" if any(x in line for x in ["休", "請", "息"]) else "force_assign"
             shifts = []
             if "早" in sh_str or "整" in sh_str: shifts.append("早")
@@ -615,7 +612,6 @@ def to_excel_master(schedule_result, year, month, docs, assts):
     ctr_val = st.session_state.config.get("ctr_count", 2)
     flt_val = st.session_state.config.get("flt_count", 1)
 
-    # 標題單一行置頂，放大並跨欄合併
     sheet.merge_range(0, 0, 0, 18, f"祐德牙醫診所 {month}月班表", fmts['h_main_title'])
     sheet.set_row(0, 30)
     
@@ -623,19 +619,16 @@ def to_excel_master(schedule_result, year, month, docs, assts):
     row = 2
     
     for w_dates in p_weeks:
-        # 1. 星期/日期標題列
         sheet.write(row, 0, "日期", fmts['h_col']); col = 1
         for dt in w_dates:
             is_even = dt["date"].weekday() % 2 != 0
             f_head = fmts['h_even'] if is_even else fmts['h_odd']
             if not dt["is_curr"]: f_head = fmts['h_gray']
-            
             disp_text = f"{dt['date'].month}/{dt['date'].day} ({['一','二','三','四','五','六'][dt['date'].weekday()]})" if dt["is_curr"] else f"非本月 {dt['date'].month}/{dt['date'].day}"
             sheet.merge_range(row, col, row, col+2, disp_text, f_head)
             col += 3
         row += 1
         
-        # 2. 早午晚時段標題列
         sheet.write(row, 0, "時段", fmts['h_col']); col = 1
         for dt in w_dates:
             is_even = dt["date"].weekday() % 2 != 0
@@ -646,7 +639,6 @@ def to_excel_master(schedule_result, year, month, docs, assts):
                 col += 1
         row += 1
         
-        # 3. 醫師與助理排班列
         for doc in docs:
             sheet.write(row, 0, doc["nick"], fmts['h_col']); col = 1
             for dt in w_dates:
@@ -659,19 +651,17 @@ def to_excel_master(schedule_result, year, month, docs, assts):
                         f_cell = [fmts['c_even_1'], fmts['c_even_2'], fmts['c_even_3']][i] if is_even else [fmts['c_odd_1'], fmts['c_odd_2'], fmts['c_odd_3']][i]
                         k = f"{dt['str']}_{s}"
                         anm = schedule_result.get(k, {}).get("doctors", {}).get(doc["name"], "")
+                        rescued_docs = schedule_result.get(k, {}).get("rescued", {}).get("doctors", [])
                         
                         if anm:
                             val = next((a["nick"] for a in assts if a["name"]==anm), "")
-                        elif f"{dt['str']}_{s}_{doc['name']}" in manual_set:
-                            val = "⚠️缺"
-                        else:
-                            val = "休"
-                            
+                            if anm in rescued_docs: val += "(救)"
+                        elif f"{dt['str']}_{s}_{doc['name']}" in manual_set: val = "⚠️缺"
+                        else: val = "休"
                         sheet.write(row, col, val, f_cell)
                     col += 1
             row += 1
             
-        # 4. 行政櫃台流動角色列
         for rnm, rk, ri in [("櫃台1","counter",0), ("櫃台2","counter",1), ("流動","floater",0), ("流動2","floater",1), ("看/行","look",0)]:
             sheet.write(row, 0, rnm, fmts['h_col']); col = 1
             for dt in w_dates:
@@ -684,15 +674,17 @@ def to_excel_master(schedule_result, year, month, docs, assts):
                         f_cell = [fmts['c_even_1'], fmts['c_even_2'], fmts['c_even_3']][i] if is_even else [fmts['c_odd_1'], fmts['c_odd_2'], fmts['c_odd_3']][i]
                         k = f"{dt['str']}_{s}"
                         lst = schedule_result.get(k, {}).get(rk, [])
+                        rescued_lst = schedule_result.get(k, {}).get("rescued", {}).get(rk, [])
                         
                         if ri < len(lst):
-                            val = next((a["nick"] for a in assts if a["name"]==lst[ri]), "")
+                            anm = lst[ri]
+                            val = next((a["nick"] for a in assts if a["name"]==anm), "")
+                            if anm in rescued_lst: val += "(救)"
                         else:
                             req = 0
                             if rk == "counter": req = ctr_val
                             elif rk == "floater": req = max(flt_val, 2) if (dyn_flt_val and shift_docs_count[k] >= 5) else flt_val
                             val = "⚠️缺" if ri < req else ""
-                            
                         sheet.write(row, col, val, f_cell)
                     col += 1
             row += 1
@@ -717,7 +709,6 @@ def to_excel_individual(schedule_result, year, month, assts, docs):
             elif (dt_obj.weekday(), sh) in parsed_admin.get(anm, set()):
                 act += 1
                 
-        # 個人班表標題 - 擴展兩行避免吃字
         s.merge_range(0, 0, 0, 10, f"祐德牙醫診所 {month}月班表", fmts['h_main_title'])
         s.set_row(0, 30)
         s.merge_range(1, 0, 1, 10, f"姓名：{anm}    (實排: {act} / 上限: {a['custom_max'] or b_max})", fmts['h_name'])
@@ -736,18 +727,19 @@ def to_excel_individual(schedule_result, year, month, assts, docs):
             s.write(row_off+4, col_off+1, ['一','二','三','四','五','六'][dt.weekday()], f_cell)
             for ci, sh in enumerate(["早","午","晚"]):
                 v = ""; data = schedule_result.get(f"{dt}_{sh}", {})
+                rescued_all = data.get("rescued", {}).get("doctors", []) + data.get("rescued", {}).get("counter", []) + data.get("rescued", {}).get("floater", [])
                 
-                if (dt.weekday(), sh) in parsed_admin.get(anm, set()):
-                    v="行"
+                if (dt.weekday(), sh) in parsed_admin.get(anm, set()): v="行"
                 elif anm in data.get("look", []): v="看"
                 elif anm in data["floater"]: v="流"
                 elif anm in data["counter"]: v="櫃"
                 else:
                     for dn, asn in data.get("doctors", {}).items():
                         if asn == anm: v = next((d["nick"] for d in docs if d["name"]==dn), dn)
+                        
+                if v and anm in rescued_all: v += "(救)"
                 s.write(row_off+4, col_off+2+ci, v, f_cell)
                 
-        # 底部加入排班註記與工時
         last_row = mid + 6
         notes = [
             "註：全診及午晚班有空請輪流抽空吃飯，謹守30分鐘規定，以免影響其他助理。",
@@ -890,7 +882,7 @@ elif step == "4. 班表生成":
             child = [{"headerName": sn, "field": f"{dn}_{sn}", "editable": True, "cellEditor": "agCheckboxCellEditor", "cellRenderer": "agCheckboxCellRenderer", "cellClass": "is_odd" if i%2==0 else "is_even", "cellStyle": cell_style_js, "width": 55} for sn in ["早","午","晚"]]
             cd.append({"headerName": f"星期{dn}", "children": child, "headerClass": "header-odd" if i%2==0 else "header-even"})
         
-        grid_height = len(doc_names) * 45 + 120  # 動態計算高度：人數 * 行高 + 表頭高度
+        grid_height = len(doc_names) * 45 + 120  
         res = AgGrid(pd.DataFrame(rows), gridOptions={"columnDefs": cd, "rowHeight": 45}, height=grid_height, allow_unsafe_jscode=True, theme="alpine", key=f"ag_{key}")
         if res['data'] is not None:
             nr = {}; rd = res['data'].to_dict('records') if isinstance(res['data'], pd.DataFrame) else res['data']
@@ -995,15 +987,22 @@ elif step == "7. 排班微調":
                 s_off, s_full, s_half, s_other = 0, 0, 0, 0
                 for d in sat_dates:
                     s_set = daily_p[nm].get(d, set())
-                    if len(s_set) == 0: s_off += 1
-                    elif "早" in s_set and "午" in s_set and "晚" in s_set: s_full += 1
-                    elif "早" in s_set and "午" in s_set and "晚" not in s_set: s_half += 1
-                    else: s_other += 1
+                    if len(s_set) == 0: 
+                        s_off += 1
+                    elif "晚" in s_set:
+                        if "午" in s_set: 
+                            s_full += 1 # 全天或午晚 (符合晚班規定)
+                        else:
+                            s_other += 1 # 破格: 單晚或早晚
+                    elif "早" in s_set and "午" in s_set and len(s_set) == 2:
+                        s_half += 1 # 完美的早午
+                    else:
+                        s_other += 1 # 破格: 單早、單午
                         
                 st.markdown(f"**{nm}** ({a['type']})\n- 總診: :{status_color}[{curr_counts[nm]}] | **流: {curr_floaters[nm]}**")
                 s_status = "✅" if (s_off >= 1 and s_full <= 2 and s_other == 0) else "⚠️"
                 if a["type"] == "兼職": s_status = "🆗(PT)"
-                st.caption(f"- {s_status} 週六: 休{s_off} | 早午{s_half} | 全天{s_full}" + (f" | 破格{s_other}" if s_other else ""))
+                st.caption(f"- {s_status} 週六: 休{s_off} | 早午{s_half} | 晚班{s_full}" + (f" | 破格{s_other}" if s_other else ""))
                 if triples or heaven_earth: st.markdown(f"- 🚩 :orange[全:{triples}]|:red[天:{heaven_earth}]")
                 st.markdown("---")
 
@@ -1020,7 +1019,6 @@ elif step == "7. 排班微調":
     dynamic_flt = c3.checkbox("醫師≥5自動雙流動", value=dyn_flt_val, help="人力不足時可關閉以節省流動人力")
     balance_flt = c4.checkbox("強制平均流動診次", value=bal_flt_val, help="關閉時優先滿足醫師指定跟診順位")
     
-    # 儲存開關狀態與滑桿狀態
     if dynamic_flt != dyn_flt_val or balance_flt != bal_flt_val or ctr != ctr_val or flt != flt_val:
         st.session_state.config["dynamic_flt"] = dynamic_flt
         st.session_state.config["balance_flt"] = balance_flt
@@ -1028,12 +1026,19 @@ elif step == "7. 排班微調":
         st.session_state.config["flt_count"] = flt
         save_config(st.session_state.config)
 
-    if st.button("🚀 執行自動排班演算法", type="primary"):
-        with st.spinner("雙階段演算法運算中..."):
-            if 'result' in st.session_state: del st.session_state['result']
-            if 'saved_result' in st.session_state.config: del st.session_state.config['saved_result']
+    c_btn1, c_btn2 = st.columns(2)
+    if c_btn1.button("🚀 執行嚴格自動排班", type="primary"):
+        with st.spinner("正在執行嚴格排班..."):
             res = run_auto_schedule(st.session_state.config["manual_schedule"], st.session_state.config["leaves"], st.session_state.config.get("pairing_matrix",{}), st.session_state.config.get("adv_rules",{}), ctr, flt, st.session_state.config.get("forced_assigns", {}), dynamic_flt, balance_flt)
             st.session_state.result = res; st.session_state.config["saved_result"] = res; save_config(st.session_state.config); st.rerun()
+
+    if c_btn2.button("🚑 執行填洞救援 (允許破格抓人)", type="secondary"):
+        if 'result' in st.session_state:
+            with st.spinner("強制填補空缺中..."):
+                res = run_phase3_rescue(st.session_state.result, st.session_state.config["manual_schedule"], st.session_state.config["leaves"], st.session_state.config.get("adv_rules",{}), assts, ctr, flt, y, m)
+                st.session_state.result = res; st.session_state.config["saved_result"] = res; save_config(st.session_state.config); st.rerun()
+        else:
+            st.error("請先執行「嚴格自動排班」以產生基礎班表！")
             
     if 'result' in st.session_state:
         st.divider()
@@ -1212,7 +1217,9 @@ elif step == "7. 排班微調":
                                 st.rerun()
                             except Exception as e: st.error(f"AI 解析失敗，請換個說法。詳細錯誤：{e}")
 
-        p_weeks = get_padded_weeks(y, m); a_opts = ["", "⚠️缺", "休"] + [a["nick"] for a in get_active_assistants()]
+        p_weeks = get_padded_weeks(y, m); 
+        base_nicks = [a["nick"] for a in get_active_assistants()]
+        a_opts = ["", "⚠️缺", "休"] + base_nicks + [f"{n}(救)" for n in base_nicks]
         nm2n = {a["name"]: a["nick"] for a in get_active_assistants()}; n2nm = {a["nick"]: a["name"] for a in get_active_assistants()}
         leaves_data = st.session_state.config.get("leaves", {})
         
@@ -1223,7 +1230,6 @@ elif step == "7. 排班微調":
 
         with st.form("adj_form"):
             for wi, w_dates in enumerate(p_weeks):
-                # 改為以「早/午/晚」為單位的空閒人力陣列
                 shift_off_staff = {}
                 for dt in w_dates:
                     if not dt["is_curr"]: continue
@@ -1244,15 +1250,15 @@ elif step == "7. 排班微調":
                             f = f"{dt['str']}_{s}"
                             if dt["is_curr"]:
                                 anm = st.session_state.result.get(f, {}).get("doctors", {}).get(d["name"], "")
+                                rescued_docs = st.session_state.result.get(f, {}).get("rescued", {}).get("doctors", [])
                                 is_scheduled = f"{dt['str']}_{s}_{d['name']}" in manual_set
                                 if anm:
-                                    r[f] = nm2n.get(anm, "")
-                                elif is_scheduled:
-                                    r[f] = "⚠️缺"
-                                else:
-                                    r[f] = "休"
-                            else:
-                                r[f] = "-"
+                                    disp_name = nm2n.get(anm, "")
+                                    if anm in rescued_docs: disp_name += "(救)"
+                                    r[f] = disp_name
+                                elif is_scheduled: r[f] = "⚠️缺"
+                                else: r[f] = "休"
+                            else: r[f] = "-"
                     rows.append(r)
                 for rnm, rk, ri in [("櫃1","counter",0), ("櫃2","counter",1), ("流","floater",0), ("流2","floater",1), ("看/行","look",0)]:
                     r = {"person": rnm, "type":"role", "key":rk, "idx":ri}
@@ -1261,16 +1267,18 @@ elif step == "7. 排班微調":
                             f = f"{dt['str']}_{s}"
                             if dt["is_curr"]:
                                 lst = st.session_state.result.get(f, {}).get(rk, [])
+                                rescued_lst = st.session_state.result.get(f, {}).get("rescued", {}).get(rk, [])
                                 if ri < len(lst):
-                                    r[f] = nm2n.get(lst[ri], "")
+                                    anm = lst[ri]
+                                    disp_name = nm2n.get(anm, "")
+                                    if anm in rescued_lst: disp_name += "(救)"
+                                    r[f] = disp_name
                                 else:
                                     req = 0
                                     if rk == "counter": req = ctr
                                     elif rk == "floater": req = max(flt, 2) if (dynamic_flt and shift_docs_count[f] >= 5) else flt
-                                    
                                     r[f] = "⚠️缺" if ri < req else ""
-                            else: 
-                                r[f] = "-"
+                            else: r[f] = "-"
                     rows.append(r)
                 
                 cd = [{"headerName": "人員", "field": "person", "pinned": "left", "width": 80, "editable": False, "cellStyle": {"fontWeight":"bold","borderRight":"2px solid #333","backgroundColor":"#fff"}}]
@@ -1278,10 +1286,9 @@ elif step == "7. 排班微調":
                     child = [{"headerName": s, "field": f"{dt['str']}_{s}", "editable": dt["is_curr"], "cellEditor": "agSelectCellEditor", "cellEditorParams": {"values": a_opts}, "cellClass": "is_odd" if dt["date"].weekday()%2==0 else "is_even", "cellStyle": cell_style_js, "width": 55} for s in ["早","午","晚"]]
                     cd.append({"headerName": dt["disp"], "children": child, "headerClass": "header-odd" if dt["date"].weekday()%2==0 else "header-even"})
                 
-                grid_height = len(rows) * 40 + 120  # 動態計算高度
+                grid_height = len(rows) * 40 + 120  
                 AgGrid(pd.DataFrame(rows), gridOptions={"columnDefs": cd, "rowHeight": 40}, height=grid_height, allow_unsafe_jscode=True, theme="alpine", key=f"ag_final_{wi}")
                 
-                # 獨立繪製每一天的早、午、晚空閒名單
                 off_cols = st.columns(len(w_dates))
                 for idx, dt in enumerate(w_dates):
                     if dt["is_curr"]:
@@ -1295,7 +1302,38 @@ elif step == "7. 排班微調":
                 st.markdown("<br>", unsafe_allow_html=True)
 
             if st.form_submit_button("💾 同步更新與儲存"):
-                st.session_state.config["saved_result"] = st.session_state.result; save_config(st.session_state.config); st.rerun()
+                # 重大修復：真正讀取前端網格的修改並寫回 st.session_state.result
+                for wi in range(len(p_weeks)):
+                    ag_data = st.session_state.get(f"ag_final_{wi}", {}).get("data")
+                    if ag_data is not None:
+                        df_out = pd.DataFrame(ag_data) if isinstance(ag_data, list) else ag_data
+                        for _, r in df_out.iterrows():
+                            r_type = r.get("type")
+                            for dt in p_weeks[wi]:
+                                if not dt["is_curr"]: continue
+                                for s in ["早","午","晚"]:
+                                    f = f"{dt['str']}_{s}"
+                                    if f not in r: continue
+                                    
+                                    val_raw = r[f] if r[f] is not None else ""
+                                    val_nick = val_raw.replace("(救)", "").strip()
+                                    val_name = n2nm.get(val_nick, "") if val_nick and val_nick not in ["-", "⚠️缺", "休"] else ""
+                                    
+                                    if r_type == "doc":
+                                        doc_name = r["name"]
+                                        if val_name: st.session_state.result[f]["doctors"][doc_name] = val_name
+                                        else: st.session_state.result[f]["doctors"].pop(doc_name, None)
+                                    elif r_type == "role":
+                                        rk = r["key"]; idx = r["idx"]
+                                        lst = st.session_state.result[f].get(rk, [])
+                                        while len(lst) <= idx: lst.append("")
+                                        lst[idx] = val_name
+                                        while lst and not lst[-1]: lst.pop()
+                                        st.session_state.result[f][rk] = lst
+                                        
+                st.session_state.config["saved_result"] = st.session_state.result
+                save_config(st.session_state.config)
+                st.rerun()
                 
         # 專屬 AI 匯出 JSON 功能區塊
         st.divider()
