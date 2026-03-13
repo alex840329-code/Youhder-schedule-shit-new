@@ -256,13 +256,17 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             
             # --- 嚴格鐵律 ---
             if wd == 5 and asst_info.get("type") == "全職":
+                # 1. 放寬為允許2個星期六晚班
                 sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[name][d])
-                # 放寬為允許2個星期六晚班
                 if sh == "晚" and sat_nites >= 2: return False 
                 
-                # 確保至少有一個完整的星期六休息 (整天都沒有班)
-                off_sats = [sd for sd in sat_dates if len(p_daily[name][sd]) == 0]
-                if len(off_sats) == 1 and off_sats[0] == dt_str: return False 
+                # 2. 確保至少有一個完整的星期六休息 (最多只能上總星期六數-1天)
+                worked_sats = [sd for sd in sat_dates if len(p_daily[name][sd]) > 0]
+                if dt_str not in worked_sats and len(worked_sats) >= len(sat_dates) - 1: return False 
+                
+                # 3. 強制連班：午班必須有早班，晚班必須有午班 (禁止出現午晚、早晚、或單診)
+                if sh == "午" and "早" not in p_daily[name][dt_str]: return False
+                if sh == "晚" and "午" not in p_daily[name][dt_str]: return False
             
             if p_counts[name] >= p_limits[name] and wd != 5: return False 
             
@@ -310,15 +314,22 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 if wd == 5 and asst_info.get("type") == "全職": 
                     score += 15000
                     
-                    # === 加入排班鐵律的防呆懲罰 (給 Phase 3 填洞時參考) ===
+                    # 確保班表連貫性 (給予絕對高分，保證只要開局了就能連著上)
+                    if sh == "午" and "早" in p_daily[c][dt_str]:
+                        score += 5000000
+                    if sh == "晚" and "午" in p_daily[c][dt_str]:
+                        sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[c][d])
+                        if sat_nites < 2:
+                            score += 5000000
+                            
+                    # 防呆懲罰
                     sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[c][d])
-                    # 超過2個星期六晚班，給予極大懲罰
                     if sh == "晚" and sat_nites >= 2:
-                        score -= 2000000  # 極度不想排第三個六晚
+                        score -= 20000000  
                     
-                    off_sats = [sd for sd in sat_dates if len(p_daily[c][sd]) == 0]
-                    if len(off_sats) == 1 and off_sats[0] == dt_str:
-                        score -= 2000000  # 極度不想剝奪最後一個完整休假
+                    worked_sats = [sd for sd in sat_dates if len(p_daily[c][sd]) > 0]
+                    if dt_str not in worked_sats and len(worked_sats) >= len(sat_dates) - 1:
+                        score -= 20000000  
                 
                 scored.append((c, score + random.random()))
             scored.sort(key=lambda x: x[1], reverse=True)
@@ -389,12 +400,13 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             # 【強制防線】：填洞時也絕對不允許犧牲最後一個完整休假的星期六，以及不允許超過2個六晚
             if wd == 5 and asst_info.get("type") == "全職":
                 sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[name][d])
-                if sh == "晚" and sat_nites >= 2:
-                    return False # 絕對阻擋，超過2次六晚寧可留空！
+                if sh == "晚" and sat_nites >= 2: return False 
 
-                off_sats = [sd for sd in sat_dates if len(p_daily[name][sd]) == 0]
-                if len(off_sats) == 1 and off_sats[0] == dt_str: 
-                    return False # 絕對阻擋，沒有完整休假寧可留空！
+                worked_sats = [sd for sd in sat_dates if len(p_daily[name][sd]) > 0]
+                if dt_str not in worked_sats and len(worked_sats) >= len(sat_dates) - 1: return False 
+
+                if sh == "午" and "早" not in p_daily[name][dt_str]: return False
+                if sh == "晚" and "午" not in p_daily[name][dt_str]: return False
 
             rule = adv_rules.get(name, {})
             s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
@@ -947,17 +959,18 @@ elif step == "7. 排班微調":
                 triples = sum(1 for s_set in daily_p[nm].values() if len(s_set) == 3)
                 heaven_earth = sum(1 for s_set in daily_p[nm].values() if "早" in s_set and "晚" in s_set and "午" not in s_set)
                 
-                s_off, s_nite, s_day = 0, 0, 0
+                s_off, s_full, s_half, s_other = 0, 0, 0, 0
                 for d in sat_dates:
                     s_set = daily_p[nm].get(d, set())
-                    if not s_set: s_off += 1
-                    elif "晚" in s_set: s_nite += 1
-                    else: s_day += 1
+                    if len(s_set) == 0: s_off += 1
+                    elif "早" in s_set and "午" in s_set and "晚" in s_set: s_full += 1
+                    elif "早" in s_set and "午" in s_set and "晚" not in s_set: s_half += 1
+                    else: s_other += 1
                         
                 st.markdown(f"**{nm}** ({a['type']})\n- 總診: :{status_color}[{curr_counts[nm]}] | **流: {curr_floaters[nm]}**")
-                s_status = "✅" if s_off >= 1 and s_nite <= 2 else "⚠️"
+                s_status = "✅" if (s_off >= 1 and s_full <= 2 and s_other == 0) else "⚠️"
                 if a["type"] == "兼職": s_status = "🆗(PT)"
-                st.caption(f"- {s_status} 週六: 休{s_off}|早午{s_day}|晚{s_nite}")
+                st.caption(f"- {s_status} 週六: 休{s_off} | 早午{s_half} | 全天{s_full}" + (f" | 破格{s_other}" if s_other else ""))
                 if triples or heaven_earth: st.markdown(f"- 🚩 :orange[全:{triples}]|:red[天:{heaven_earth}]")
                 st.markdown("---")
 
