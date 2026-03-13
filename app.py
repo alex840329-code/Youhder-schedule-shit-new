@@ -20,7 +20,7 @@ except ImportError:
     HAS_AGGRID = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v21.20 (超級磁吸連班演算法版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v21.21 (雙櫃台彈性開關版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 if not HAS_AGGRID:
@@ -81,7 +81,7 @@ def get_default_config():
         "pairing_matrix": {}, "adv_rules": {}, "template_odd": {}, "template_even": {},
         "year": datetime.today().year, "month": datetime.today().month % 12 + 1,
         "manual_schedule": [], "leaves": {}, "saved_result": {}, "forced_assigns": {},
-        "dynamic_flt": True, "balance_flt": True
+        "dynamic_flt": True, "dynamic_ctr": True, "balance_flt": True
     }
 
 def load_config():
@@ -162,8 +162,8 @@ def parse_slot_string(text, is_fixed=False):
         if wd is not None and sh is not None: res_set.add((wd, sh))
     return res_set
 
-# --- 3. 核心排班演算法 (雙階段填洞版 + 動態流動2) ---
-def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_count, flt_count, forced_assigns, dynamic_flt=True, balance_flt=True):
+# --- 3. 核心排班演算法 (雙階段填洞版 + 動態流動2/動態櫃台2) ---
+def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_count, flt_count, forced_assigns, dynamic_flt=True, balance_flt=True, dynamic_ctr=True):
     assts = get_active_assistants(); docs = get_active_doctors()
     year = st.session_state.config.get("year", datetime.today().year)
     month = st.session_state.config.get("month", datetime.today().month % 12 + 1)
@@ -233,13 +233,17 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
 
     # 2. 自動排班 (嚴格階段)
     for slot in slots:
-        dt_str, sh = slot.split("_"); curr_dt = datetime.strptime(dt_str, "%Y-%m-%d").date(); wd = curr_dt.weekday()
+        dt_str, sh = split_res = slot.split("_"); curr_dt = datetime.strptime(dt_str, "%Y-%m-%d").date(); wd = curr_dt.weekday()
         duty_docs = [x["Doctor"] for x in manual_schedule if x["Date"]==dt_str and x["Shift"]==sh]
         slot_res = result[slot]
         
         current_flt_count = flt_count
         if dynamic_flt and len(duty_docs) >= 5: 
             current_flt_count = max(flt_count, 2)
+            
+        current_ctr_count = ctr_count
+        if dynamic_ctr and len(duty_docs) >= 5:
+            current_ctr_count = max(ctr_count, 2)
         
         def assigned_in_slot(name):
             is_admin = (wd, sh) in parsed_admin.get(name, set())
@@ -338,7 +342,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
         cand_pool = [a["name"] for a in assts]
         
         # 先排櫃台
-        needed_ctr = ctr_count - len(slot_res["counter"])
+        needed_ctr = current_ctr_count - len(slot_res["counter"])
         for c in calculate_priority(cand_pool, "counter"):
             if needed_ctr <= 0: break
             slot_res["counter"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); needed_ctr -= 1
@@ -390,6 +394,9 @@ def run_phase3_rescue(current_result, manual_schedule, leaves, adv_rules, assts,
     p_floater_counts = {a["name"]: 0 for a in assts} 
     p_daily = {a["name"]: collections.defaultdict(set) for a in assts}
     
+    dyn_flt_val = st.session_state.config.get("dynamic_flt", True)
+    dyn_ctr_val = st.session_state.config.get("dynamic_ctr", True)
+    
     # 重算當前時數
     for slot, res in current_result.items():
         dt_str, sh = slot.split("_")
@@ -410,10 +417,10 @@ def run_phase3_rescue(current_result, manual_schedule, leaves, adv_rules, assts,
         if "rescued" not in slot_res: slot_res["rescued"] = {"doctors": [], "counter": [], "floater": []}
         
         duty_docs = [x["Doctor"] for x in manual_schedule if x["Date"]==dt_str and x["Shift"]==sh]
-        dyn_flt_val = st.session_state.config.get("dynamic_flt", True)
         current_flt_count = max(flt_count, 2) if (dyn_flt_val and len(duty_docs) >= 5) else flt_count
+        current_ctr_count = max(ctr_count, 2) if (dyn_ctr_val and len(duty_docs) >= 5) else ctr_count
         
-        needed_ctr = ctr_count - len(slot_res["counter"])
+        needed_ctr = current_ctr_count - len(slot_res["counter"])
         needed_flt = current_flt_count - len(slot_res["floater"])
         missing_docs = [d for d in duty_docs if d not in slot_res["doctors"] or not slot_res["doctors"][d]]
         
@@ -622,6 +629,7 @@ def to_excel_master(schedule_result, year, month, docs, assts):
     shift_docs_count = collections.defaultdict(int)
     for x in manual_schedule: shift_docs_count[f"{x['Date']}_{x['Shift']}"] += 1
     dyn_flt_val = st.session_state.config.get("dynamic_flt", True)
+    dyn_ctr_val = st.session_state.config.get("dynamic_ctr", True)
     ctr_val = st.session_state.config.get("ctr_count", 2)
     flt_val = st.session_state.config.get("flt_count", 1)
 
@@ -695,7 +703,7 @@ def to_excel_master(schedule_result, year, month, docs, assts):
                             if anm in rescued_lst: val += "(救)"
                         else:
                             req = 0
-                            if rk == "counter": req = ctr_val
+                            if rk == "counter": req = max(ctr_val, 2) if (dyn_ctr_val and shift_docs_count[k] >= 5) else ctr_val
                             elif rk == "floater": req = max(flt_val, 2) if (dyn_flt_val and shift_docs_count[k] >= 5) else flt_val
                             val = "⚠️缺" if ri < req else ""
                         sheet.write(row, col, val, f_cell)
@@ -780,7 +788,7 @@ with st.sidebar:
     y_cfg = st.session_state.config.get("year"); m_cfg = st.session_state.config.get("month")
     t_logic, t_month = st.tabs(["⚙️ 邏輯", "📅 班表"])
     with t_logic:
-        logic_keys = ["api_key", "doctors_struct", "assistants_struct", "pairing_matrix", "adv_rules", "template_odd", "template_even", "forced_assigns", "dynamic_flt", "balance_flt"]
+        logic_keys = ["api_key", "doctors_struct", "assistants_struct", "pairing_matrix", "adv_rules", "template_odd", "template_even", "forced_assigns", "dynamic_flt", "dynamic_ctr", "balance_flt"]
         st.download_button("📥 下載基本邏輯", json.dumps({k:st.session_state.config.get(k) for k in logic_keys}, ensure_ascii=False, indent=4), f"yude_logic_{datetime.now().strftime('%Y%m%d')}.json", "application/json", use_container_width=True)
         ul = st.file_uploader("📤 還原邏輯", type="json", key="ulogic")
         if ul and st.button("確認還原邏輯", use_container_width=True):
@@ -1019,20 +1027,25 @@ elif step == "7. 排班微調":
                 if triples or heaven_earth: st.markdown(f"- 🚩 :orange[全:{triples}]|:red[天:{heaven_earth}]")
                 st.markdown("---")
 
-    c1, c2, c3, c4 = st.columns(4)
+    st.markdown("---")
+    c1, c2, c3 = st.columns([1,1,2])
     ctr_val = st.session_state.config.get("ctr_count", 2)
     flt_val = st.session_state.config.get("flt_count", 1)
     
     ctr = c1.slider("預設櫃台數", 1,3,ctr_val)
     flt = c2.slider("預設流動數", 0,3,flt_val)
     
+    dyn_ctr_val = st.session_state.config.get("dynamic_ctr", True)
     dyn_flt_val = st.session_state.config.get("dynamic_flt", True)
     bal_flt_val = st.session_state.config.get("balance_flt", True)
     
-    dynamic_flt = c3.checkbox("醫師≥5自動雙流動", value=dyn_flt_val, help="人力不足時可關閉以節省流動人力")
-    balance_flt = c4.checkbox("強制平均流動診次", value=bal_flt_val, help="關閉時優先滿足醫師指定跟診順位")
+    c3.write("**⚙️ 人力彈性配置**")
+    dynamic_ctr = c3.checkbox("醫師≥5 自動雙櫃台", value=dyn_ctr_val, help="開啟時若醫師≥5人，櫃台將提升至2人")
+    dynamic_flt = c3.checkbox("醫師≥5 自動雙流動", value=dyn_flt_val, help="開啟時若醫師≥5人，流動將提升至2人")
+    balance_flt = c3.checkbox("強制平均流動診次", value=bal_flt_val, help="關閉時優先滿足醫師指定跟診順位")
     
-    if dynamic_flt != dyn_flt_val or balance_flt != bal_flt_val or ctr != ctr_val or flt != flt_val:
+    if dynamic_ctr != dyn_ctr_val or dynamic_flt != dyn_flt_val or balance_flt != bal_flt_val or ctr != ctr_val or flt != flt_val:
+        st.session_state.config["dynamic_ctr"] = dynamic_ctr
         st.session_state.config["dynamic_flt"] = dynamic_flt
         st.session_state.config["balance_flt"] = balance_flt
         st.session_state.config["ctr_count"] = ctr
@@ -1042,7 +1055,7 @@ elif step == "7. 排班微調":
     c_btn1, c_btn2 = st.columns(2)
     if c_btn1.button("🚀 執行嚴格自動排班", type="primary"):
         with st.spinner("正在執行嚴格排班..."):
-            res = run_auto_schedule(st.session_state.config["manual_schedule"], st.session_state.config["leaves"], st.session_state.config.get("pairing_matrix",{}), st.session_state.config.get("adv_rules",{}), ctr, flt, st.session_state.config.get("forced_assigns", {}), dynamic_flt, balance_flt)
+            res = run_auto_schedule(st.session_state.config["manual_schedule"], st.session_state.config["leaves"], st.session_state.config.get("pairing_matrix",{}), st.session_state.config.get("adv_rules",{}), ctr, flt, st.session_state.config.get("forced_assigns", {}), dynamic_flt, balance_flt, dynamic_ctr)
             st.session_state.result = res; st.session_state.config["saved_result"] = res; save_config(st.session_state.config); st.rerun()
 
     if c_btn2.button("🚑 執行填洞救援 (允許破格抓人)", type="secondary"):
@@ -1135,7 +1148,7 @@ elif step == "7. 排班微調":
                             st.session_state.config["manual_schedule"] = manual
                             save_config(st.session_state.config)
                             
-                            st.session_state.result = run_auto_schedule(manual, leaves, st.session_state.config.get("pairing_matrix",{}), st.session_state.config.get("adv_rules",{}), ctr, flt, forced, dynamic_flt, balance_flt)
+                            st.session_state.result = run_auto_schedule(manual, leaves, st.session_state.config.get("pairing_matrix",{}), st.session_state.config.get("adv_rules",{}), ctr, flt, forced, dynamic_flt, balance_flt, dynamic_ctr)
                             st.session_state.config["saved_result"] = st.session_state.result
                             save_config(st.session_state.config)
                             
@@ -1221,7 +1234,7 @@ elif step == "7. 排班微調":
                                 st.session_state.config["manual_schedule"] = manual
                                 save_config(st.session_state.config)
                                 
-                                st.session_state.result = run_auto_schedule(manual, leaves, st.session_state.config.get("pairing_matrix",{}), st.session_state.config.get("adv_rules",{}), ctr, flt, forced, dynamic_flt, balance_flt)
+                                st.session_state.result = run_auto_schedule(manual, leaves, st.session_state.config.get("pairing_matrix",{}), st.session_state.config.get("adv_rules",{}), ctr, flt, forced, dynamic_flt, balance_flt, dynamic_ctr)
                                 st.session_state.config["saved_result"] = st.session_state.result
                                 save_config(st.session_state.config)
                                 
@@ -1288,7 +1301,7 @@ elif step == "7. 排班微調":
                                     r[f] = disp_name
                                 else:
                                     req = 0
-                                    if rk == "counter": req = ctr
+                                    if rk == "counter": req = max(ctr, 2) if (dynamic_ctr and shift_docs_count[f] >= 5) else ctr
                                     elif rk == "floater": req = max(flt, 2) if (dynamic_flt and shift_docs_count[f] >= 5) else flt
                                     r[f] = "⚠️缺" if ri < req else ""
                             else: r[f] = "-"
