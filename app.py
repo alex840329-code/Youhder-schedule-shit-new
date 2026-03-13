@@ -20,7 +20,7 @@ except ImportError:
     HAS_AGGRID = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v21.19 (手動覆寫與救援獨立版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v21.20 (超級磁吸連班演算法版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 if not HAS_AGGRID:
@@ -255,15 +255,13 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
             if s_wl and (wd, sh) not in s_wl: return False
             
-            # --- 星期六嚴格鐵律 ---
+            # --- 星期六嚴格鐵律 (取消單向阻擋，依賴 Priority 磁吸) ---
             if wd == 5 and asst_info.get("type") == "全職":
                 sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[name][d])
-                if sh == "晚" and sat_nites >= 2: return False 
+                if sh == "晚" and sat_nites >= 2: return False # 絕對阻擋：晚班最多兩次
                 
                 worked_sats = [sd for sd in sat_dates if len(p_daily[name][sd]) > 0]
-                if dt_str not in worked_sats and len(worked_sats) >= len(sat_dates) - 1: return False 
-                
-                if sh == "晚" and "午" not in p_daily[name][dt_str]: return False
+                if dt_str not in worked_sats and len(worked_sats) >= len(sat_dates) - 1: return False # 絕對阻擋：至少休一個完整六
             
             if p_counts[name] >= p_limits[name] and wd != 5: return False 
             
@@ -308,14 +306,30 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                     worked_sats = sum(1 for sd in sat_dates if sd != dt_str and len(p_daily[c][sd]) > 0)
                     sat_nites = sum(1 for d in sat_dates if d != dt_str and "晚" in p_daily[c][d])
                     
+                    # 【超級磁吸連班演算法】
                     if sh == "早":
-                        if worked_sats < len(sat_dates) - 1: score += 5000000
-                    elif sh == "午":
-                        if "早" in p_daily[c][dt_str]: score += 10000000 
+                        if worked_sats < len(sat_dates) - 1:
+                            score += (4 - worked_sats) * 1000000 # 沒上滿的優先
                         else:
-                            if sat_nites < 2 and worked_sats < len(sat_dates) - 1: score += 3000000 
+                            score -= 50000000 # 額度滿了，踢除
+                            
+                    elif sh == "午":
+                        if "早" in p_daily[c][dt_str]:
+                            score += 50000000 # 早上有來，下午【絕對優先】留下來
+                        else:
+                            if worked_sats < len(sat_dates) - 1:
+                                score += (4 - worked_sats) * 1000000 # 允許從下午開始上 (形成午晚)
+                            else:
+                                score -= 50000000 # 額度滿了，踢除
+                                
                     elif sh == "晚":
-                        if "午" in p_daily[c][dt_str] and sat_nites < 2: score += 10000000
+                        if "午" in p_daily[c][dt_str]:
+                            if sat_nites < 2:
+                                score += 50000000 # 下午有來且晚班缺額，晚上【絕對優先】留下來
+                            else:
+                                score -= 50000000 # 下午有來但晚班滿了，晚上【絕對踢除】-> 形成完美的早午班！
+                        else:
+                            score -= 50000000 # 沒上下午班，晚上【絕對踢除】-> 杜絕單晚班或早晚班！
                 
                 scored.append((c, score + random.random()))
             scored.sort(key=lambda x: x[1], reverse=True)
@@ -358,7 +372,6 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 if needed_flt <= 0: break
                 slot_res["floater"].append(c); p_counts[c] += 1; p_daily[c][dt_str].add(sh); p_floater_counts[c] += 1; needed_flt -= 1
 
-    # 本次更新：移除自動排班中的「強制填洞」，保留絕對空缺供使用者確認，並由另一個專屬救援函數處理填洞。
     return result
 
 # --- 新增：專屬填洞救援演算法 (破格抓人) ---
@@ -431,16 +444,16 @@ def run_phase3_rescue(current_result, manual_schedule, leaves, adv_rules, assts,
                 gap = p_targets[c] - p_counts[c]
                 score = gap * 2000 
                 
-                # 救援階段：扣除極大分數作為阻擋，但如果真的沒人，系統還是會抓分數最低的人來填洞
+                # 救援階段：扣除分數作為軟阻擋，真的沒人還是會抓來填洞
                 if wd == 5 and asst_info.get("type") == "全職":
                     sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[c][d])
-                    if sh == "晚" and sat_nites >= 2: score -= 10000000
+                    if sh == "晚" and sat_nites >= 2: score -= 1000000
                     
                     curr_worked = [sd for sd in sat_dates if len(p_daily[c][sd]) > 0]
-                    if dt_str not in curr_worked and len(curr_worked) >= len(sat_dates) - 1: score -= 10000000
+                    if dt_str not in curr_worked and len(curr_worked) >= len(sat_dates) - 1: score -= 1000000
                     
-                    if sh == "晚" and "午" not in p_daily[c][dt_str]: score -= 10000000
-                    if sh == "午" and "早" not in p_daily[c][dt_str]: score -= 1000000 # 盡量不要單抓午班來救火
+                    if sh == "晚" and "午" not in p_daily[c][dt_str]: score -= 1000000
+                    if sh == "午" and "早" not in p_daily[c][dt_str]: score -= 100000 # 盡量不要單抓午班來救火
                     
                 scored.append((c, score + random.random()))
             scored.sort(key=lambda x: x[1], reverse=True)
@@ -1302,7 +1315,6 @@ elif step == "7. 排班微調":
                 st.markdown("<br>", unsafe_allow_html=True)
 
             if st.form_submit_button("💾 同步更新與儲存"):
-                # 重大修復：真正讀取前端網格的修改並寫回 st.session_state.result
                 for wi in range(len(p_weeks)):
                     ag_state = st.session_state.get(f"ag_final_{wi}")
                     if ag_state is None: continue
