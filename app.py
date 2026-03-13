@@ -844,7 +844,9 @@ elif step == "4. 班表生成":
         for i, dn in enumerate(days):
             child = [{"headerName": sn, "field": f"{dn}_{sn}", "editable": True, "cellEditor": "agCheckboxCellEditor", "cellRenderer": "agCheckboxCellRenderer", "cellClass": "is_odd" if i%2==0 else "is_even", "cellStyle": cell_style_js, "width": 55} for sn in ["早","午","晚"]]
             cd.append({"headerName": f"星期{dn}", "children": child, "headerClass": "header-odd" if i%2==0 else "header-even"})
-        res = AgGrid(pd.DataFrame(rows), gridOptions={"columnDefs": cd, "rowHeight": 45, "domLayout": 'autoHeight'}, allow_unsafe_jscode=True, theme="alpine", key=f"ag_{key}")
+        
+        grid_height = len(doc_names) * 45 + 120  # 動態計算高度：人數 * 行高 + 表頭高度
+        res = AgGrid(pd.DataFrame(rows), gridOptions={"columnDefs": cd, "rowHeight": 45}, height=grid_height, allow_unsafe_jscode=True, theme="alpine", key=f"ag_{key}")
         if res['data'] is not None:
             nr = {}; rd = res['data'].to_dict('records') if isinstance(res['data'], pd.DataFrame) else res['data']
             for row in rd:
@@ -1229,7 +1231,9 @@ elif step == "7. 排班微調":
                 for dt in w_dates:
                     child = [{"headerName": s, "field": f"{dt['str']}_{s}", "editable": dt["is_curr"], "cellEditor": "agSelectCellEditor", "cellEditorParams": {"values": a_opts}, "cellClass": "is_odd" if dt["date"].weekday()%2==0 else "is_even", "cellStyle": cell_style_js, "width": 55} for s in ["早","午","晚"]]
                     cd.append({"headerName": dt["disp"], "children": child, "headerClass": "header-odd" if dt["date"].weekday()%2==0 else "header-even"})
-                AgGrid(pd.DataFrame(rows), gridOptions={"columnDefs": cd, "rowHeight": 40, "domLayout": 'autoHeight'}, allow_unsafe_jscode=True, theme="alpine", key=f"ag_final_{wi}")
+                
+                grid_height = len(rows) * 40 + 120  # 動態計算高度
+                AgGrid(pd.DataFrame(rows), gridOptions={"columnDefs": cd, "rowHeight": 40}, height=grid_height, allow_unsafe_jscode=True, theme="alpine", key=f"ag_final_{wi}")
                 
                 # 獨立繪製每一天的早、午、晚空閒名單
                 off_cols = st.columns(len(w_dates))
