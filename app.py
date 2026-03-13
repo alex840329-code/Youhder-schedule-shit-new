@@ -267,15 +267,19 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 worked_sats = [sd for sd in sat_dates if len(p_daily[name][sd]) > 0]
                 if dt_str not in worked_sats and len(worked_sats) >= len(sat_dates) - 1: return False # 絕對阻擋：至少休一個完整六
             
-            if p_counts[name] >= p_limits[name] and wd != 5: return False 
+            if p_counts[name] >= p_limits[name]:
+                # 全職人員：星期六允許突破上限（磁吸連班需要），其他日一律阻擋
+                # 兼職人員：任何日期都不能超出 custom_max
+                if asst_info.get("type") != "全職" or wd != 5: return False
             
+            if rule.get("role_limit") == "僅行政": return False  # 僅行政診：不參與自動排班，由 admin_slots 固定佔位
             if rule.get("role_limit") == "僅櫃台" and role != "counter": return False
             if rule.get("role_limit") == "僅流動" and role != "floater": return False
             if rule.get("role_limit") == "僅跟診" and role != "doctor": return False
             if rule.get("shift_limit") == "僅晚班" and sh != "晚": return False
             if rule.get("shift_limit") == "僅早班" and sh != "早": return False
             if rule.get("shift_limit") == "僅午班" and sh != "午": return False
-            
+
             if role == "counter":
                 for av in [x.strip() for x in rule.get("avoid", "").split(",") if x.strip()]:
                     if av in slot_res["counter"]: return False
@@ -311,18 +315,19 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                     sat_nites = sum(1 for d in sat_dates if d != dt_str and "晚" in p_daily[c][d])
                     
                     # 【超級磁吸連班演算法】
+                    sat_room = len(sat_dates) - 1 - worked_sats  # 剩餘可上的星期六空間
                     if sh == "早":
                         if worked_sats < len(sat_dates) - 1:
-                            score += (4 - worked_sats) * 1000000 # 沒上滿的優先
+                            score += sat_room * 1000000 # 剩餘空間越多，獎勵越高
                         else:
                             score -= 50000000 # 額度滿了，踢除
-                            
+
                     elif sh == "午":
                         if "早" in p_daily[c][dt_str]:
                             score += 50000000 # 早上有來，下午【絕對優先】留下來
                         else:
                             if worked_sats < len(sat_dates) - 1:
-                                score += (4 - worked_sats) * 1000000 # 允許從下午開始上 (形成午晚)
+                                score += sat_room * 1000000 # 允許從下午開始上 (形成午晚)
                             else:
                                 score -= 50000000 # 額度滿了，踢除
                                 
@@ -434,6 +439,7 @@ def run_phase3_rescue(current_result, manual_schedule, leaves, adv_rules, assts,
             s_wl = parse_slot_string(rule.get("slot_whitelist", ""), is_fixed=False)
             if s_wl and (wd, sh) not in s_wl: return False
             
+            if rule.get("role_limit") == "僅行政": return False  # 救援也不強拉行政診人員
             if rule.get("role_limit") == "僅櫃台" and role != "counter": return False
             if rule.get("role_limit") == "僅流動" and role != "floater": return False
             if rule.get("role_limit") == "僅跟診" and role != "doctor": return False
@@ -446,22 +452,36 @@ def run_phase3_rescue(current_result, manual_schedule, leaves, adv_rules, assts,
             scored = []
             for c in candidates:
                 if not can_assign_rescue(c, r_type): continue
-                
+
                 asst_info = next((a for a in assts if a["name"] == c), {})
+                rule = adv_rules.get(c, {})
                 gap = p_targets[c] - p_counts[c]
-                score = gap * 2000 
-                
+                score = gap * 2000
+
+                # 救援也需要正確的角色傾向（軟性版本）
+                if r_type == "counter":
+                    if asst_info.get("is_main_counter"): score += 50000
+                    if rule.get("shift_limit") == "僅晚班" and sh == "晚": score += 800000
+                if r_type == "floater":
+                    if asst_info.get("is_main_counter"): score -= 100000
+                    score += (50 - p_floater_counts[c]) * 10000  # 弱版流動平衡
+
                 # 救援階段：扣除分數作為軟阻擋，真的沒人還是會抓來填洞
                 if wd == 5 and asst_info.get("type") == "全職":
                     sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[c][d])
                     if sh == "晚" and sat_nites >= 2: score -= 1000000
-                    
+
                     curr_worked = [sd for sd in sat_dates if len(p_daily[c][sd]) > 0]
                     if dt_str not in curr_worked and len(curr_worked) >= len(sat_dates) - 1: score -= 1000000
-                    
-                    if sh == "晚" and "午" not in p_daily[c][dt_str]: score -= 1000000
+
+                    if sh == "晚" and "午" not in p_daily[c][dt_str]:
+                        if "早" in p_daily[c][dt_str]:
+                            score -= 500000   # 天地班：有早但無午，次優（比全無人好）
+                        else:
+                            score -= 2000000  # 完全無班底，最不優先
+
                     if sh == "午" and "早" not in p_daily[c][dt_str]: score -= 100000 # 盡量不要單抓午班來救火
-                    
+
                 scored.append((c, score + random.random()))
             scored.sort(key=lambda x: x[1], reverse=True)
             return [x[0] for x in scored]
