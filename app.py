@@ -20,7 +20,7 @@ except ImportError:
     HAS_AGGRID = False
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="祐德牙醫排班系統 v21.17 (人力彈性開關版)", layout="wide", page_icon="🦷")
+st.set_page_config(page_title="祐德牙醫排班系統 v21.18 (連班磁吸與多日期解析版)", layout="wide", page_icon="🦷")
 CONFIG_FILE = 'yude_config_v11.json'
 
 if not HAS_AGGRID:
@@ -256,7 +256,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             
             # --- 嚴格鐵律 ---
             if wd == 5 and asst_info.get("type") == "全職":
-                # 1. 放寬為允許2個星期六晚班
+                # 1. 晚班上限2次 (保證至少有一個星期六晚上休息)
                 sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[name][d])
                 if sh == "晚" and sat_nites >= 2: return False 
                 
@@ -264,8 +264,7 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 worked_sats = [sd for sd in sat_dates if len(p_daily[name][sd]) > 0]
                 if dt_str not in worked_sats and len(worked_sats) >= len(sat_dates) - 1: return False 
                 
-                # 3. 強制連班：午班必須有早班，晚班必須有午班 (禁止出現午晚、早晚、或單診)
-                if sh == "午" and "早" not in p_daily[name][dt_str]: return False
+                # 3. 晚班必須綁午班 (禁止出現早晚、或單晚)，但允許直接從午班開始 (形成午晚)
                 if sh == "晚" and "午" not in p_daily[name][dt_str]: return False
             
             if p_counts[name] >= p_limits[name] and wd != 5: return False 
@@ -299,7 +298,8 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 if r_type == "counter":
                     if asst_info.get("is_main_counter"): score += 50000 
                     if asst_info.get("type") == "兼職": score += 20000
-                    if rule.get("shift_limit") == "僅晚班" and sh == "晚": score += 200000
+                    # 【修復】大幅提升「僅晚班」權重，超越白名單分數，保證小瑜排得上
+                    if rule.get("shift_limit") == "僅晚班" and sh == "晚": score += 800000
                 
                 if r_type == "floater":
                     if asst_info.get("is_main_counter"): score -= 100000 
@@ -314,21 +314,32 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
                 if wd == 5 and asst_info.get("type") == "全職": 
                     score += 15000
                     
-                    # 確保班表連貫性 (給予絕對高分，保證只要開局了就能連著上)
-                    if sh == "午" and "早" in p_daily[c][dt_str]:
-                        score += 5000000
-                    if sh == "晚" and "午" in p_daily[c][dt_str]:
-                        sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[c][d])
-                        if sat_nites < 2:
-                            score += 5000000
+                    worked_sats = sum(1 for sd in sat_dates if sd != dt_str and len(p_daily[c][sd]) > 0)
+                    sat_nites = sum(1 for d in sat_dates if d != dt_str and "晚" in p_daily[c][d])
+                    
+                    # 確保班表連貫性 (透過千萬級別高分磁吸)
+                    if sh == "早":
+                        if worked_sats < len(sat_dates) - 1: 
+                            score += 5000000 # 迫切需要湊滿上班天數，強力吸進早班
+                    elif sh == "午":
+                        if "早" in p_daily[c][dt_str]: 
+                            score += 10000000 # 絕對優先讓早上有班的人接著上下午
+                        else:
+                            if worked_sats < len(sat_dates) - 1:
+                                score += 3000000 # 允許直接從午班開始上 (為了後續形成午晚)
+                    elif sh == "晚":
+                        if "午" in p_daily[c][dt_str] and sat_nites < 2: 
+                            score += 10000000 # 絕對優先讓下午有班的人接著上晚班，達成2個晚班的目標
+                        else: 
+                            score -= 1000000 # 懲罰斷班
                             
-                    # 防呆懲罰
-                    sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[c][d])
-                    if sh == "晚" and sat_nites >= 2:
+                    # 防呆絕對懲罰
+                    curr_nites = sum(1 for d in sat_dates if "晚" in p_daily[c][d])
+                    if sh == "晚" and curr_nites >= 2:
                         score -= 20000000  
                     
-                    worked_sats = [sd for sd in sat_dates if len(p_daily[c][sd]) > 0]
-                    if dt_str not in worked_sats and len(worked_sats) >= len(sat_dates) - 1:
+                    curr_worked = [sd for sd in sat_dates if len(p_daily[c][sd]) > 0]
+                    if dt_str not in curr_worked and len(curr_worked) >= len(sat_dates) - 1:
                         score -= 20000000  
                 
                 scored.append((c, score + random.random()))
@@ -397,15 +408,15 @@ def run_auto_schedule(manual_schedule, leaves, pairing_matrix, adv_rules, ctr_co
             
             asst_info = next((a for a in assts if a["name"] == name), {})
 
-            # 【強制防線】：填洞時也絕對不允許犧牲最後一個完整休假的星期六，以及不允許超過2個六晚
+            # 【強制防線】：絕對不能剝奪最後一個完整休假的星期六，以及不允許超過2個六晚
             if wd == 5 and asst_info.get("type") == "全職":
                 sat_nites = sum(1 for d in sat_dates if "晚" in p_daily[name][d])
                 if sh == "晚" and sat_nites >= 2: return False 
 
                 worked_sats = [sd for sd in sat_dates if len(p_daily[name][sd]) > 0]
                 if dt_str not in worked_sats and len(worked_sats) >= len(sat_dates) - 1: return False 
-
-                if sh == "午" and "早" not in p_daily[name][dt_str]: return False
+                
+                # 填洞階段依然要求晚班必須綁午班
                 if sh == "晚" and "午" not in p_daily[name][dt_str]: return False
 
             rule = adv_rules.get(name, {})
@@ -467,9 +478,31 @@ def fuzzy_match_person(name_str, lst):
 
 def parse_command_local(cmd, year, month, docs, assts):
     acts = []; wd_map = {"一":1, "二":2, "三":3, "四":4, "五":5, "六":6, "日":7, "天":7, "1":1, "2":2, "3":3, "4":4, "5":5, "6":6, "7":7}
-    lines = cmd.replace("，", "\n").replace("、", "\n").split("\n")
     
-    for line in lines:
+    # 支援逗號分隔的多日期處理 (例如: 小瑜 4/4, 4/11, 4/18 晚上上班)
+    expanded_lines = []
+    for raw_line in cmd.split('\n'):
+        raw_line = raw_line.strip()
+        if not raw_line: continue
+        
+        # 尋找連續逗號分隔的日期群
+        multi_date_match = re.search(r'((?:\d+[月/.-])?\d+[號日]?(?:\s*[，,、]\s*(?:\d+[月/.-])?\d+[號日]?)+)', raw_line)
+        if multi_date_match:
+            dates_str = multi_date_match.group(1)
+            date_items = re.split(r'\s*[，,、]\s*', dates_str)
+            base_str = raw_line.replace(dates_str, "{_DATE_}")
+            last_m = str(month)
+            for di in date_items:
+                dm = re.match(r'(?:(\d+)[月/.-])?(\d+)[號日]?', di.strip())
+                if dm:
+                    if dm.group(1): last_m = dm.group(1)
+                    d_val = dm.group(2)
+                    expanded_lines.append(base_str.replace("{_DATE_}", f"{last_m}/{d_val}"))
+        else:
+            # 兼容舊版，若沒有特殊多日期格式，直接把頓號取代為換行
+            expanded_lines.extend(raw_line.replace("，", "\n").replace("、", "\n").split("\n"))
+
+    for line in expanded_lines:
         line = line.strip()
         if not line: 
             continue
@@ -1012,8 +1045,8 @@ elif step == "7. 排班微調":
                 st.session_state.config["forced_assigns"] = {}; save_config(st.session_state.config); st.rerun()
                 
         if "本地關鍵字" in mode:
-            st.info("💡 **支援的關鍵字句型：**\n1. `XX醫師禮拜X[早上/下午/晚上/整天]給YY跟`\n2. `XX第N個星期X[早午/晚/整天]上班/休假`\n3. `XX[於]M月D日[星期X][早上/下午/晚上/整天]請假/上班` (例: 欣霓4/11星期六早午上班)")
-            cmd = st.text_area("請輸入指令 (可換行輸入多筆)", placeholder="峻豪醫師禮拜四整天給昀霏跟\n欣霓第2個星期六早午上班\n雯萱第3個星期六休假\n燿東醫師4/10號要請假")
+            st.info("💡 **支援的關鍵字句型：**\n1. `XX醫師禮拜X[早上/下午/晚上/整天]給YY跟`\n2. `XX第N個星期X[早午/晚/整天]上班/休假`\n3. `XX[於]M月D日[星期X][早上/下午/晚上/整天]請假/上班` (例: 小瑜 4/4, 4/11, 4/18 晚上上班)")
+            cmd = st.text_area("請輸入指令 (可換行輸入多筆)", placeholder="峻豪醫師禮拜四整天給昀霏跟\n小瑜 4/4, 4/11, 4/18 晚上上班\n雯萱第3個星期六休假\n燿東醫師4/10號要請假")
             if st.button("執行本地調整"):
                 if cmd:
                     with st.spinner("系統極速解析中..."):
